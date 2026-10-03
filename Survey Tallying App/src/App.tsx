@@ -70,6 +70,7 @@ const Icon = ({ name, size = 18 }: { name: string; size?: number }) => {
       </>
     ),
     plus: <path d="M12 5v14M5 12h14" />,
+    close: <path d="M6 6l12 12M18 6 6 18" />,
     search: (
       <>
         <circle cx="11" cy="11" r="7" />
@@ -95,6 +96,7 @@ const Icon = ({ name, size = 18 }: { name: string; size?: number }) => {
       </>
     ),
     back: <path d="m15 18-6-6 6-6" />,
+    up: <path d="m18 15-6-6-6 6" />,
     check: <path d="m5 12 4 4L19 6" />,
     undo: (
       <>
@@ -179,8 +181,36 @@ function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return <select className="input" {...props} />
 }
 
-function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className="input textarea" {...props} />
+function TextArea({
+  value,
+  onChange,
+  ...props
+}: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+
+  // Grow to fit the content instead of scrolling inside a fixed box. Height is
+  // reset to auto first so the browser can report the true content height.
+  const fit = () => {
+    const element = ref.current
+    if (!element) return
+    element.style.height = "auto"
+    element.style.height = `${element.scrollHeight}px`
+  }
+
+  useLayoutEffect(fit, [value])
+
+  return (
+    <textarea
+      ref={ref}
+      className="input textarea"
+      value={value}
+      onChange={(event) => {
+        onChange?.(event)
+        fit()
+      }}
+      {...props}
+    />
+  )
 }
 
 function isAnswered(answer: Answer | undefined) {
@@ -311,6 +341,38 @@ function questionNumbers(questions: Question[]): Array<number | null> {
   })
 }
 
+type OutlinePref = {
+  side: "left" | "right"
+  collapsed: boolean
+  width: number
+}
+
+const OUTLINE_KEY = "tallyform.outline"
+const OUTLINE_MIN = 210
+const OUTLINE_MAX = 460
+
+function loadOutlinePref(): OutlinePref {
+  try {
+    const raw = window.localStorage.getItem(OUTLINE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<OutlinePref>
+      if (parsed.side === "left" || parsed.side === "right") {
+        return {
+          side: parsed.side,
+          collapsed: Boolean(parsed.collapsed),
+          width: Math.min(
+            OUTLINE_MAX,
+            Math.max(OUTLINE_MIN, Number(parsed.width) || 260),
+          ),
+        }
+      }
+    }
+  } catch {
+    // Fall through to defaults if storage is unavailable.
+  }
+  return { side: "right", collapsed: false, width: 260 }
+}
+
 function csvCell(value: unknown) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`
 }
@@ -332,6 +394,7 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
+  const [showToTop, setShowToTop] = useState(false)
   const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
@@ -419,6 +482,13 @@ function App() {
     const timer = window.setTimeout(() => setNotice(""), 3600)
     return () => window.clearTimeout(timer)
   }, [notice])
+
+  useEffect(() => {
+    const onScroll = () => setShowToTop(window.scrollY > 400)
+    onScroll()
+    window.addEventListener("scroll", onScroll, { passive: true })
+    return () => window.removeEventListener("scroll", onScroll)
+  }, [])
 
   // Each view remembers where you scrolled to, so moving between tabs puts you
   // back where you left instead of snapping to the top. useLayoutEffect runs
@@ -605,7 +675,6 @@ function App() {
               key={survey.id}
               survey={survey}
               onChange={(next) => updateSurvey(survey.id, () => next)}
-              onTally={() => setView("tally")}
               onBack={() => setView("surveys")}
             />
           )}
@@ -636,6 +705,24 @@ function App() {
           <Icon name="check" />
           {notice}
         </div>
+      )}
+      {showToTop && (
+        <button
+          className="to-top"
+          type="button"
+          aria-label="Back to top"
+          onClick={() =>
+            window.scrollTo({
+              top: 0,
+              behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
+                .matches
+                ? "auto"
+                : "smooth",
+            })
+          }
+        >
+          <Icon name="up" size={19} />
+        </button>
       )}
     </div>
   )
@@ -839,20 +926,79 @@ function Metric({ value, label }: { value: number; label: string }) {
 function SurveyBuilder({
   survey,
   onChange,
-  onTally,
   onBack,
 }: {
   survey: Survey
   onChange: (survey: Survey) => void
-  onTally: () => void
   onBack: () => void
 }) {
   const [selected, setSelected] = useState(survey.questions[0]?.id ?? "")
+  const [savedNotice, setSavedNotice] = useState(false)
+  const [outline, setOutline] = useState<OutlinePref>(loadOutlinePref)
   const [addCount, setAddCount] = useState("1")
   const [insertPosition, setInsertPosition] = useState("end")
   const [pendingType, setPendingType] = useState<QuestionType>("single")
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([])
   const update = (patch: Partial<Survey>) => onChange({ ...survey, ...patch })
+
+  const setOutlinePref = (patch: Partial<OutlinePref>) =>
+    setOutline((current) => {
+      const next = { ...current, ...patch }
+      try {
+        window.localStorage.setItem(OUTLINE_KEY, JSON.stringify(next))
+      } catch {
+        // Layout preference is best-effort.
+      }
+      return next
+    })
+
+  /** Drag the inner edge to resize; the panel grows toward the content. */
+  const startResize = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = outline.width
+    const onMove = (move: PointerEvent) => {
+      const delta =
+        outline.side === "right" ? startX - move.clientX : move.clientX - startX
+      setOutlinePref({
+        width: Math.min(
+          OUTLINE_MAX,
+          Math.max(OUTLINE_MIN, Math.round(startWidth + delta)),
+        ),
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  /** Drag the header left or right to swap which side the panel sits on. */
+  const startMove = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const onUp = (up: PointerEvent) => {
+      const delta = up.clientX - startX
+      if (Math.abs(delta) > 60) {
+        setOutlinePref({ side: delta > 0 ? "right" : "left" })
+      }
+      window.removeEventListener("pointerup", onUp)
+    }
+    window.addEventListener("pointerup", onUp)
+  }
+
+  const saveForm = () => {
+    update({ status: "active" })
+    setSavedNotice(true)
+  }
+
+  useEffect(() => {
+    if (!savedNotice) return
+    const timer = window.setTimeout(() => setSavedNotice(false), 2600)
+    return () => window.clearTimeout(timer)
+  }, [savedNotice])
   const updateQuestion = (id: string, patch: Partial<Question>) =>
     update({
       questions: survey.questions.map((item) =>
@@ -962,39 +1108,69 @@ function SurveyBuilder({
           <Button
             variant="primary"
             disabled={!valid}
-            onClick={() => {
-              update({ status: "active" })
-              onTally()
-            }}
+            onClick={saveForm}
           >
-            Save & tally <Icon name="arrow" />
+            Save form
           </Button>
+          {savedNotice && (
+            <span className="saved-note" role="status">
+              Form saved
+            </span>
+          )}
         </div>
       </header>
-      <div className="builder-layout">
-        <aside className="builder-outline">
-          <div className="add-menu">
-            <p>Add questions</p>
-            <span className="add-helper">
-              Pick a type to start. How many, and exactly where they land, comes
-              next.
-            </span>
-            {Object.entries(TYPE_LABELS).map(([type, label]) => (
+      <div
+          className={`builder-layout outline-${outline.side}${
+            outline.collapsed ? " outline-collapsed" : ""
+          }`}
+          style={{ "--outline-w": `${outline.width}px` } as React.CSSProperties}
+        >
+          <aside className="builder-outline">
+            <span
+              className="outline-resizer"
+              onPointerDown={startResize}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize question panel"
+            />
+            <div
+              className="outline-head"
+              onPointerDown={startMove}
+              title="Drag to move the panel to the other side"
+            >
+              <Icon name="grip" size={14} />
+              <span className="outline-title">Questions</span>
+              <span className="outline-count">
+                {survey.questions.filter((q) => q.type !== "section").length}
+              </span>
               <button
-                key={type}
-                disabled={!addCount || Number(addCount) < 1}
-                onClick={() => addQuestion(type as QuestionType)}
+                className="outline-collapse"
+                type="button"
+                aria-label={
+                  outline.collapsed
+                    ? "Expand question panel"
+                    : "Minimise question panel"
+                }
+                aria-expanded={!outline.collapsed}
+                onClick={() =>
+                  setOutlinePref({ collapsed: !outline.collapsed })
+                }
               >
-                <Icon name="plus" size={15} />
-                {label}
+                <Icon name={outline.collapsed ? "back" : "up"} size={14} />
               </button>
-            ))}
-          </div>
-          <div className="panel-title">
-            <span>Questions</span>
-            <span>
-              {survey.questions.filter((q) => q.type !== "section").length}
-            </span>
+            </div>
+            {outline.collapsed ? null : (
+              <>
+                <div className="add-menu">
+            <button
+              className="add-question"
+              type="button"
+              title="Add a question, then choose its type"
+              onClick={() => addQuestion(pendingType)}
+            >
+              <Icon name="plus" size={15} />
+              Add question
+            </button>
           </div>
           <div className="question-list">
             {survey.questions.map((question, index) => (
@@ -1036,8 +1212,10 @@ function SurveyBuilder({
                 </span>
               </button>
             ))}
-          </div>
-        </aside>
+            </div>
+              </>
+            )}
+          </aside>
         <section className="builder-editor">
           <div className="survey-settings card">
             <div className="section-title">
@@ -1176,10 +1354,10 @@ function SurveyBuilder({
                   label={
                     selectedQuestion.type === "section"
                       ? "Section heading"
-                      : "Question prompt"
+                      : "Question"
                   }
                 >
-                  <TextInput
+                  <TextArea
                     value={selectedQuestion.prompt}
                     onChange={(e) =>
                       updateQuestion(selectedQuestion.id, {
@@ -1207,7 +1385,7 @@ function SurveyBuilder({
                   </SelectInput>
                 </Field>
                 <Field label="Helper text">
-                  <TextInput
+                  <TextArea
                     value={selectedQuestion.helpText}
                     placeholder="Optional guidance"
                     onChange={(e) =>
@@ -1532,9 +1710,15 @@ function BatchQuestionEditor({
               </Field>
             </div>
           </div>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close"
+            title="Close"
+            onClick={onCancel}
+          >
+            <Icon name="close" size={17} />
+          </button>
         </header>
         <div className="batch-list">
           {questions.map((question, index) => (
@@ -1552,10 +1736,10 @@ function BatchQuestionEditor({
                     label={
                       question.type === "section"
                         ? "Section heading"
-                        : "Question prompt"
+                        : "Question"
                     }
                   >
-                    <TextInput
+                    <TextArea
                       autoFocus={index === 0}
                       value={question.prompt}
                       onChange={(event) =>
@@ -1605,7 +1789,7 @@ function BatchQuestionEditor({
                 </div>
                 <div className="batch-question-settings">
                   <Field label="Helper text">
-                    <TextInput
+                    <TextArea
                       value={question.helpText}
                       placeholder="Optional instructions"
                       onChange={(event) =>
@@ -1784,6 +1968,7 @@ function TallyWorkspace({
     question: string
     answer: string
   } | null>(null)
+  const [savePromptOpen, setSavePromptOpen] = useState(false)
   const advancingQuestionRef = useRef<string | null>(null)
   const ratingAdvanceTimerRef = useRef<number | null>(null)
   const visibleItems = visibleQuestions(survey, answers)
@@ -1792,6 +1977,13 @@ function TallyWorkspace({
   )
   const active = questions[activeIndex]
   const valid = questions.every((q) => !q.required || isAnswered(answers[q.id]))
+  const missingIndex = questions.findIndex(
+    (question) => question.required && !isAnswered(answers[question.id]),
+  )
+  // Every required question has an answer. Optional ones may still be blank,
+  // which is what the save check has always allowed.
+  const complete = questions.length > 0 && missingIndex === -1
+  const answeredCount = Object.values(answers).filter(isAnswered).length
 
   // Switching between Quick keys, Tap form and Response grid changes the page
   // height, so each mode keeps its own scroll position instead of inheriting
@@ -1846,31 +2038,31 @@ function TallyWorkspace({
       }
     }
   }
+  const explainMissing = (index: number) => {
+    const missing = questions[index]
+    setValidationMessage(
+      missing
+        ? `Please answer the required question: “${missing.prompt}”.`
+        : "Please complete all required questions.",
+    )
+    if (index >= 0) {
+      setActiveIndex(index)
+      window.setTimeout(
+        () =>
+          document
+            .getElementById(`tally-question-${missing.id}`)
+            ?.scrollIntoView({ behavior: "smooth", block: "center" }),
+        0,
+      )
+    }
+  }
   const save = () => {
     if (questions.length === 0) {
       setValidationMessage("This survey has no answerable questions.")
       return
     }
-    if (!valid) {
-      const missingIndex = questions.findIndex(
-        (question) => question.required && !isAnswered(answers[question.id]),
-      )
-      const missing = questions[missingIndex]
-      setValidationMessage(
-        missing
-          ? `Please answer the required question: “${missing.prompt}”.`
-          : "Please complete all required questions.",
-      )
-      if (missingIndex >= 0) {
-        setActiveIndex(missingIndex)
-        window.setTimeout(
-          () =>
-            document
-              .getElementById(`tally-question-${missing.id}`)
-              ?.scrollIntoView({ behavior: "smooth", block: "center" }),
-          0,
-        )
-      }
+    if (!complete) {
+      explainMissing(missingIndex)
       return
     }
     const now = new Date().toISOString()
@@ -1894,6 +2086,58 @@ function TallyWorkspace({
       responses: survey.responses.filter((r) => r.id !== record.id),
     })
   }
+  const requestSave = () => {
+    if (questions.length === 0) {
+      setValidationMessage("This survey has no answerable questions.")
+      return
+    }
+    if (!complete) {
+      explainMissing(missingIndex)
+      return
+    }
+    setSavePromptOpen(true)
+  }
+  const confirmSave = () => {
+    setSavePromptOpen(false)
+    save()
+  }
+
+  // Once every required question has an answer there is nothing left to do but
+  // save, so ask. Guarded on answeredCount so a survey with no required
+  // questions doesn't prompt the moment the tally screen opens.
+  useEffect(() => {
+    if (complete && answeredCount > 0) setSavePromptOpen(true)
+  }, [complete, answeredCount])
+
+  // Enter walks forward through the tally, and on the last question it asks to
+  // save; Enter again confirms. Textareas keep their newlines, and the key is
+  // left alone while some other dialog owns the screen.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (savePromptOpen) {
+        if (event.key === "Enter" && !event.repeat) {
+          event.preventDefault()
+          confirmSave()
+        } else if (event.key === "Escape") {
+          event.preventDefault()
+          setSavePromptOpen(false)
+        }
+        return
+      }
+      if (event.key !== "Enter" || event.repeat || mode === "grid") return
+      if (document.querySelector(".modal-backdrop")) return
+      const target = event.target as HTMLElement | null
+      if (target?.tagName === "TEXTAREA") return
+      event.preventDefault()
+      if (activeIndex >= questions.length - 1) {
+        requestSave()
+        return
+      }
+      setActiveIndex((current) => Math.min(current + 1, questions.length - 1))
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [mode, savePromptOpen, activeIndex, questions.length, save, requestSave, confirmSave])
 
   return (
     <div className="page tally-page">
@@ -2090,6 +2334,44 @@ function TallyWorkspace({
               </div>
             ))}
         </aside>
+      )}
+      {savePromptOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="save-prompt"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="save-prompt-title"
+          >
+            <header>
+              <div>
+                <p className="eyebrow">All questions answered</p>
+                <h2 id="save-prompt-title">Save this response?</h2>
+              </div>
+              <button
+                className="modal-close"
+                type="button"
+                aria-label="Close"
+                title="Close"
+                onClick={() => setSavePromptOpen(false)}
+              >
+                <Icon name="close" size={17} />
+              </button>
+            </header>
+            <p className="save-prompt-body">
+              {answeredCount} of {questions.length} answered. Press{" "}
+              <kbd>Enter</kbd> to save it against this survey, or close the dialog
+              to keep editing.
+            </p>
+            <footer>
+              <Button onClick={() => setSavePromptOpen(false)}>Keep editing</Button>
+              <Button variant="primary" onClick={confirmSave}>
+                <Icon name="check" />
+                Save response
+              </Button>
+            </footer>
+          </section>
+        </div>
       )}
     </div>
   )
@@ -2386,7 +2668,33 @@ function ResultsView({
 }) {
   const [tab, setTab] = useState<"summary" | "responses">("summary")
   const questions = survey.questions.filter((q) => q.type !== "section")
+  // One row per question per response, so the first two columns are always the
+  // question and its answer — that is the shape people read in Excel. The wide
+  // one-row-per-response pivot stays available for pivoting and charting.
   const exportRaw = () => {
+    const headers = [
+      "Question",
+      "Answer",
+      "Type",
+      survey.identifierLabel,
+      "Created",
+    ]
+    const rows = survey.responses.flatMap((r) =>
+      questions.map((q) => [
+        q.prompt,
+        answerLabel(q, r.answers[q.id]),
+        TYPE_LABELS[q.type],
+        r.identifier,
+        r.createdAt,
+      ]),
+    )
+    downloadFile(
+      `${survey.title}-responses.csv`,
+      [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n"),
+      "text/csv",
+    )
+  }
+  const exportWide = () => {
     const headers = [
       "Response ID",
       survey.identifierLabel,
@@ -2400,7 +2708,7 @@ function ResultsView({
       ...questions.map((q) => answerLabel(q, r.answers[q.id])),
     ])
     downloadFile(
-      `${survey.title}-responses.csv`,
+      `${survey.title}-responses-wide.csv`,
       [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n"),
       "text/csv",
     )
@@ -2427,6 +2735,10 @@ function ResultsView({
           <Button onClick={exportJson}>
             <Icon name="download" />
             Backup JSON
+          </Button>
+          <Button onClick={exportWide}>
+            <Icon name="download" />
+            Export wide CSV
           </Button>
           <Button onClick={exportRaw}>
             <Icon name="download" />
