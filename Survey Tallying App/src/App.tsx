@@ -33,6 +33,7 @@ import {
   setAccountRole,
   setFeedbackStatus,
   verifyAccount,
+  verifyAllAccounts,
   type Account,
   type FeedbackItem,
   type FeedbackStatus,
@@ -54,7 +55,14 @@ import type {
   Survey,
 } from "./types"
 
-type View = "surveys" | "builder" | "tally" | "results" | "accounts" | "feedback"
+type View =
+  | "surveys"
+  | "builder"
+  | "tally"
+  | "results"
+  | "accounts"
+  | "verification"
+  | "feedback"
 type TallyMode = "quick" | "tap" | "grid"
 
 const TYPE_LABELS: Record<QuestionType, string> = {
@@ -809,7 +817,8 @@ function App() {
   // Derived rather than corrected with a render-phase setView, which forced React
   // into an extra render pass on every tab change.
   const adminView =
-    !accountsOff && (view === "accounts" || view === "feedback")
+    !accountsOff &&
+    (view === "accounts" || view === "verification" || view === "feedback")
   const activeView: View = survey || adminView ? view : "surveys"
 
   // An account is only useful once an administrator has approved it. Everything
@@ -880,6 +889,38 @@ function App() {
     const timer = window.setInterval(checkAccount, 15000)
     return () => window.clearInterval(timer)
   }, [userId, needsApproval, checkAccount])
+
+  // How many sign-ups are waiting, so the sidebar says so rather than leaving
+  // the Verification tab to be found by accident. Bumped by the tab itself
+  // after it approves or rejects someone.
+  const [pendingApprovals, setPendingApprovals] = useState(0)
+  const [accountsTick, setAccountsTick] = useState(0)
+  const bumpAccounts = useCallback(
+    () => setAccountsTick((value) => value + 1),
+    [],
+  )
+
+  useEffect(() => {
+    if (!isAdmin || accountsOff) {
+      setPendingApprovals(0)
+      return
+    }
+    let cancelled = false
+    listAccounts()
+      .then((rows) => {
+        if (!cancelled) {
+          setPendingApprovals(rows.filter((row) => !row.verified).length)
+        }
+      })
+      .catch(() => {
+        // A count is a nicety. If it cannot be read, show nothing rather than a
+        // wrong number next to the tab an administrator needs to open.
+        if (!cancelled) setPendingApprovals(0)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isAdmin, accountsOff, accountsTick])
 
   useEffect(() => {
     let cancelled = false
@@ -1249,6 +1290,13 @@ function App() {
           {isAdmin && !accountsOff && (
             <>
               <NavItem
+                active={activeView === "verification"}
+                icon="shield"
+                label="Verification"
+                badge={pendingApprovals}
+                onClick={() => setView("verification")}
+              />
+              <NavItem
                 active={activeView === "accounts"}
                 icon="users"
                 label="Accounts"
@@ -1393,6 +1441,16 @@ function App() {
             />
           )}
         </div>
+        <div className="view-pane" hidden={activeView !== "verification"}>
+          {isAdmin && !accountsOff && userId && (
+            <VerificationView
+              selfId={userId}
+              onNotice={setNotice}
+              onChanged={bumpAccounts}
+              onOpenAccounts={() => setView("accounts")}
+            />
+          )}
+        </div>
         <div className="view-pane" hidden={activeView !== "accounts"}>
           {isAdmin && !accountsOff && userId && (
             <AccountsView selfId={userId} onNotice={setNotice} />
@@ -1442,12 +1500,15 @@ function NavItem({
   icon,
   label,
   disabled,
+  badge,
   onClick,
 }: {
   active: boolean
   icon: string
   label: string
   disabled?: boolean
+  /** A count to show at the far end of the item, e.g. work waiting. */
+  badge?: number
   onClick: () => void
 }) {
   return (
@@ -1458,6 +1519,11 @@ function NavItem({
     >
       <Icon name={icon} />
       <span>{label}</span>
+      {badge ? (
+        <span className="nav-badge" aria-label={`${badge} waiting`}>
+          {badge}
+        </span>
+      ) : null}
     </button>
   )
 }
@@ -3998,6 +4064,23 @@ function formatWhen(iso: string) {
 }
 
 /**
+ * How long an account has been stuck, in the unit that still fits. An approval
+ * queue read as "3 days" tells an administrator who to deal with first; the
+ * joined timestamp above only ever tells them when it happened once.
+ */
+function formatWaiting(iso: string) {
+  const started = new Date(iso).getTime()
+  if (Number.isNaN(started)) return "waiting"
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60000))
+  if (minutes < 1) return "waiting under a minute"
+  if (minutes < 60) return `waiting ${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `waiting ${hours} hour${hours === 1 ? "" : "s"}`
+  const days = Math.floor(hours / 24)
+  return `waiting ${days} day${days === 1 ? "" : "s"}`
+}
+
+/**
  * The screen an account sits on until an administrator approves it, and the one
  * it sits on if access is revoked later. It polls for the change, so approving an
  * account in another tab lets the waiting user straight in.
@@ -4114,6 +4197,335 @@ function FeedbackDialog({
           </Button>
         </footer>
       </section>
+    </div>
+  )
+}
+
+/**
+ * The administrator's approval queue.
+ *
+ * Every account is listed, the ones stuck at the waiting-room screen first,
+ * because until an administrator approves them they hold nothing at all — no
+ * surveys and no responses, enforced by is_approved() in Row Level Security and
+ * not merely by the screen in front of them.
+ *
+ * Approving, un-approving and rejecting all call Postgres functions that
+ * re-check the caller's role server-side. Renaming, password resets, roles and
+ * suspension stay in the Accounts tab; this one is about the queue.
+ */
+function VerificationView({
+  selfId,
+  onNotice,
+  onChanged,
+  onOpenAccounts,
+}: {
+  selfId: string
+  onNotice: (message: string) => void
+  onChanged: () => void
+  onOpenAccounts: () => void
+}) {
+  const [accounts, setAccounts] = useState<Account[] | null>(null)
+  const [error, setError] = useState("")
+  const [busyId, setBusyId] = useState("")
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [query, setQuery] = useState("")
+  const [scope, setScope] = useState<"waiting" | "everyone">("waiting")
+  const confirm = useConfirm()
+
+  const reload = useCallback(() => {
+    listAccounts()
+      .then(setAccounts)
+      .catch((cause: unknown) =>
+        setError(errorText(cause, "Could not load accounts.")),
+      )
+  }, [])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const run = async (
+    id: string,
+    label: string,
+    action: () => Promise<unknown>,
+  ) => {
+    setBusyId(id)
+    setError("")
+    try {
+      await action()
+      onNotice(`${label}.`)
+      reload()
+      onChanged()
+    } catch (cause) {
+      setError(errorText(cause, `${label} failed.`))
+    } finally {
+      setBusyId("")
+    }
+  }
+
+  const waiting = useMemo(
+    () => (accounts ?? []).filter((account) => !account.verified),
+    [accounts],
+  )
+  const approved = useMemo(
+    () => (accounts ?? []).filter((account) => account.verified),
+    [accounts],
+  )
+
+  // Waiting first, and oldest-waiting first inside that group: the person who
+  // signed up three days ago has been staring at a lock the longest.
+  const ordered = useMemo(() => {
+    const all = accounts ?? []
+    return [...all].sort((a, b) => {
+      if (a.verified !== b.verified) return a.verified ? 1 : -1
+      return a.createdAt.localeCompare(b.createdAt)
+    })
+  }, [accounts])
+
+  const needle = query.trim().toLowerCase()
+  const visible = ordered.filter((account) => {
+    if (scope === "waiting" && account.verified) return false
+    if (!needle) return true
+    return account.username.toLowerCase().includes(needle)
+  })
+
+  const queueEmpty = waiting.length === 0
+
+  return (
+    <div className="page accounts-page">
+      <header className="compact-header">
+        <div>
+          <p className="eyebrow">Administrator</p>
+          <h1>Verification</h1>
+          <p className="page-sub">
+            A new account holds nothing until it is approved here — no surveys,
+            no responses, no way past the waiting room.
+          </p>
+        </div>
+        <div className="header-actions">
+          <Button onClick={reload}>
+            <Icon name="undo" />
+            Refresh
+          </Button>
+          {waiting.length > 0 && (
+            <Button
+              variant="primary"
+              disabled={bulkBusy}
+              onClick={() =>
+                confirm.ask({
+                  title: `Approve ${waiting.length} ${
+                    waiting.length === 1 ? "account" : "accounts"
+                  }?`,
+                  body: (
+                    <>
+                      Everyone waiting will be able to use Tallyform
+                      immediately:{" "}
+                      <strong>
+                        {waiting.map((account) => account.username).join(", ")}
+                      </strong>
+                      . Anyone you have not read yet will be let in too — approve
+                      them one at a time if you would rather look first.
+                    </>
+                  ),
+                  confirmLabel: `Approve ${waiting.length}`,
+                  onConfirm: async () => {
+                    setBulkBusy(true)
+                    setError("")
+                    try {
+                      const count = await verifyAllAccounts()
+                      onNotice(
+                        count === 1
+                          ? "Approved 1 account."
+                          : `Approved ${count} accounts.`,
+                      )
+                      reload()
+                      onChanged()
+                    } catch (cause) {
+                      setError(
+                        errorText(cause, "Could not approve the waiting accounts."),
+                      )
+                    } finally {
+                      setBulkBusy(false)
+                    }
+                  },
+                })
+              }
+            >
+              <Icon name="shield" />
+              Approve all {waiting.length}
+            </Button>
+          )}
+        </div>
+      </header>
+
+      <section className="metrics-strip">
+        <Metric value={waiting.length} label="Waiting for approval" />
+        <Metric value={approved.length} label="Approved" />
+        <Metric value={accounts?.length ?? 0} label="Accounts" />
+      </section>
+
+      <div className="verify-controls">
+        <div className="segmented" role="group" aria-label="Which accounts">
+          <button
+            className={scope === "waiting" ? "active" : ""}
+            aria-pressed={scope === "waiting"}
+            onClick={() => setScope("waiting")}
+          >
+            Waiting{waiting.length ? ` (${waiting.length})` : ""}
+          </button>
+          <button
+            className={scope === "everyone" ? "active" : ""}
+            aria-pressed={scope === "everyone"}
+            onClick={() => setScope("everyone")}
+          >
+            Everyone ({accounts?.length ?? 0})
+          </button>
+        </div>
+        <TextInput
+          type="search"
+          value={query}
+          aria-label="Search accounts"
+          placeholder="Search by username"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+
+      {error && (
+        <p className="login-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {accounts === null ? (
+        <div className="empty-state">
+          <h3>Loading accounts…</h3>
+        </div>
+      ) : visible.length === 0 ? (
+        <div className="empty-state">
+          <h3>
+            {needle
+              ? "No account matches that search"
+              : queueEmpty && scope === "waiting"
+                ? "Nobody is waiting"
+                : "No accounts yet"}
+          </h3>
+          <p>
+            {needle
+              ? "Try part of a username, or switch to Everyone."
+              : queueEmpty && scope === "waiting"
+                ? "Every account has been approved. New sign-ups will appear here on their own."
+                : "New registrations will appear here for approval."}
+          </p>
+          {!needle && scope === "waiting" && accounts.length > 0 && (
+            <Button onClick={() => setScope("everyone")}>
+              Show all {accounts.length} accounts
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="account-list">
+          {visible.map((account) => {
+            const isSelf = account.id === selfId
+            const busy = busyId === account.id
+            return (
+              <article
+                className={`account-card ${account.verified ? "" : "pending"}`}
+                key={account.id}
+              >
+                <div className="account-main">
+                  <span className="account-avatar" aria-hidden="true">
+                    {account.username.slice(0, 1).toUpperCase()}
+                  </span>
+                  <div className="account-id">
+                    <strong>
+                      {account.username}
+                      {isSelf && <span className="account-you">you</span>}
+                    </strong>
+                    <small>
+                      Joined {formatWhen(account.createdAt)}
+                      {!account.verified ? ` · ${formatWaiting(account.createdAt)}` : ""}
+                    </small>
+                    <div className="account-badges">
+                      <span
+                        className={`pill ${account.role === "admin" ? "pill-admin" : ""}`}
+                      >
+                        {account.role === "admin" ? "Administrator" : "User"}
+                      </span>
+                      {account.verified ? (
+                        <span className="pill pill-ok">Approved</span>
+                      ) : (
+                        <span className="pill pill-warn">Locked out</span>
+                      )}
+                      {account.disabled && (
+                        <span className="pill pill-bad">Access revoked</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="account-actions">
+                    <Button
+                      variant={account.verified ? "ghost" : "primary"}
+                      disabled={isSelf || busy}
+                      onClick={() =>
+                        run(
+                          account.id,
+                          account.verified
+                            ? `Withdrew approval for ${account.username}`
+                            : `Approved ${account.username}`,
+                          () => verifyAccount(account.id, !account.verified),
+                        )
+                      }
+                    >
+                      <Icon name="shield" />
+                      {account.verified ? "Withdraw approval" : "Approve"}
+                    </Button>
+                    {!account.verified && (
+                      <Button
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          confirm.ask({
+                            title: `Reject “${account.username}”?`,
+                            body: (
+                              <>
+                                This sign-up never had access to anything, so
+                                nothing is lost. Deleting it removes the login
+                                entirely — <strong>{account.username}</strong>{" "}
+                                could not sign in again with the same name. To
+                                keep the account and simply stop it being usable,
+                                revoke access from the Accounts tab instead.
+                              </>
+                            ),
+                            confirmLabel: "Delete this sign-up",
+                            onConfirm: () =>
+                              run(
+                                account.id,
+                                `Rejected ${account.username}`,
+                                () => deleteAccount(account.id, true),
+                              ),
+                          })
+                        }
+                      >
+                        <Icon name="trash" />
+                        Reject…
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      )}
+
+      <p className="verify-foot">
+        Renaming, password resets, roles and suspension live in{" "}
+        <button type="button" className="link-button" onClick={onOpenAccounts}>
+          Accounts
+        </button>
+        .
+      </p>
+
+      {confirm.dialog}
     </div>
   )
 }

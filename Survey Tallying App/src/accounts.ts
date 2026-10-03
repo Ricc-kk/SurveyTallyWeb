@@ -180,6 +180,21 @@ export function verifyAccount(id: string, approved: boolean) {
   )
 }
 
+/**
+ * Clear the whole waiting queue in one call.
+ *
+ * Approving twenty sign-ups one at a time is twenty round trips and twenty
+ * chances to fat-finger a username. Returns how many accounts it approved, so
+ * the tab can say "approved 3" instead of guessing.
+ */
+export async function verifyAllAccounts(): Promise<number> {
+  if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
+
+  const { data, error } = await supabase.rpc("admin_verify_all")
+  if (error) throw new Error(reason(error, "Could not approve the waiting accounts."))
+  return (data as number | null) ?? 0
+}
+
 export function setAccountRole(id: string, role: AccountRole) {
   return callAdmin(
     "admin_set_role",

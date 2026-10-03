@@ -5,7 +5,11 @@
 -- What this adds:
 --   public.profiles  one row per login, carrying the role and the verified flag
 --   public.feedback  improvement notes sent from the sidebar
---   admin RPCs       verify / edit / disable / delete another account
+--   admin RPCs       verify / approve-everyone / edit / disable / delete an account
+--   is_approved()    Row Level Security gate: an unverified account holds no
+--                    surveys or responses at all, so waiting for an
+--                    administrator is enforced by the database and not only by
+--                    the waiting-room screen in the app
 --
 -- IMPORTANT — before using the register form, turn OFF email confirmation:
 --   Supabase → Authentication → Providers → Email → "Confirm email" off.
@@ -115,6 +119,52 @@ as $$
     select 1 from public.profiles
     where id = auth.uid() and role = 'admin' and disabled = false
   );
+$$;
+
+-- Whether the caller has been let in.
+--
+-- SECURITY DEFINER for the same reason as is_admin(): the policies below call
+-- this, and a policy cannot be evaluated by a query that the function itself
+-- depends on. An administrator passes even if their own verified flag was
+-- cleared, which is what stops an admin from locking themselves out.
+create or replace function public.is_approved()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_admin() or exists (
+    select 1 from public.profiles
+    where id = auth.uid() and verified and not disabled
+  );
+$$;
+
+-- Approve everyone waiting, in one call. Returns how many rows changed.
+create or replace function public.admin_verify_all()
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  changed integer;
+begin
+  if not public.is_admin() then
+    raise exception 'Only an administrator can verify accounts';
+  end if;
+
+  -- The caller is left alone, matching every other admin action here: an admin
+  -- changing their own verification is how an account gets stranded.
+  update public.profiles
+  set verified = true
+  where not verified
+    and not disabled
+    and id <> auth.uid();
+
+  get diagnostics changed = row_count;
+  return changed;
+end;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -299,16 +349,43 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------------
--- Surveys and responses keep their owner-scoped policies from
--- auth-migration.sql: every account sees only its own data. Nothing here grants
--- an admin read access to another account's surveys — the admin powers are
--- limited to approving, editing and removing accounts, and to the feedback inbox.
+-- Surveys and responses stay owner-scoped — every account sees only its own
+-- data — and now additionally require is_approved(). The waiting-room screen in
+-- the app is a courtesy; this is the part that actually holds. Without it an
+-- unverified account can skip the UI entirely and read or write its own surveys
+-- straight from the REST API with the public anon key, because the policies in
+-- auth-migration.sql only ever asked "is this row mine?".
+--
+-- Nothing here grants an admin read access to another account's surveys — the
+-- admin powers are limited to approving, editing and removing accounts, and to
+-- the feedback inbox.
+
+drop policy if exists "owners manage their surveys" on public.surveys;
+create policy "owners manage their surveys"
+  on public.surveys
+  for all
+  to authenticated
+  using ((select auth.uid()) = user_id and (select public.is_approved()))
+  with check ((select auth.uid()) = user_id and (select public.is_approved()));
+
+drop policy if exists "owners manage their responses" on public.responses;
+create policy "owners manage their responses"
+  on public.responses
+  for all
+  to authenticated
+  using ((select auth.uid()) = user_id and (select public.is_approved()))
+  with check ((select auth.uid()) = user_id and (select public.is_approved()));
 
 alter table public.profiles enable row level security;
 
 -- Own row only. There is deliberately no update policy: a client that could
 -- update its own row could also set role = 'admin'. Every change goes through an
 -- admin RPC instead.
+--
+-- An unverified account can still read this row, and that is required rather
+-- than an oversight: it is how the app learns that the account exists and is
+-- waiting, and therefore how the waiting-room screen knows to say so. Hiding it
+-- would leave the app unable to tell "unverified" from "no profile at all".
 drop policy if exists "users read own profile" on public.profiles;
 create policy "users read own profile"
   on public.profiles
@@ -326,6 +403,11 @@ create policy "admins manage profiles"
 
 alter table public.feedback enable row level security;
 
+-- Deliberately NOT gated on is_approved(). A note left for the administrator is
+-- not app content, and leaving this one write open keeps a channel for someone
+-- who registered themselves into a waiting room they cannot otherwise escape.
+-- The sidebar button is unreachable from there anyway, since the waiting-room
+-- screen covers the whole app.
 drop policy if exists "users send feedback" on public.feedback;
 create policy "users send feedback"
   on public.feedback

@@ -188,6 +188,9 @@ h2 { letter-spacing: -.025em; }
 .nav-item:hover { color: var(--on-panel); background: var(--on-panel-hover); }
 .nav-item.active { color: var(--on-panel); background: var(--primary-line); }
 .nav-item:disabled { opacity: .38; cursor: not-allowed; }
+/* How many sign-ups are waiting. Pushed to the far end of the item so the
+   number reads as a count on the tab rather than part of its label. */
+.nav-badge { margin-left: auto; min-width: 21px; padding: 1px 6px; border-radius: 999px; background: var(--primary); color: var(--on-primary); font-size: 10px; font-weight: 800; text-align: center; }
 .theme-switch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px; margin: 16px 10px 0; border-radius: 9px; background: var(--on-panel-hover); }
 .sync-note { margin: 14px 10px -4px; color: var(--on-panel-3); font-size: 11px; }
 .theme-switch button { border: 0; background: transparent; border-radius: 7px; padding: 6px 4px; color: var(--on-panel-3); font-size: 11px; font-weight: 650; cursor: pointer; }
@@ -568,6 +571,13 @@ td.row-actions { white-space: nowrap; }
 .feedback-button .icon { color: var(--on-panel-accent); flex: 0 0 auto; }
 
 .account-list { display: grid; gap: 12px; }
+.page-sub { max-width: 56ch; margin-top: 9px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.verify-controls { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+.verify-controls .segmented { flex: 0 0 auto; }
+.verify-controls .input { flex: 1 1 220px; max-width: 320px; }
+.verify-foot { margin-top: 20px; color: var(--muted); font-size: 12px; }
+.link-button { border: 0; padding: 0; background: transparent; color: var(--primary); font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.link-button:hover { color: var(--primary-dark); }
 .account-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
 .account-card.pending { border-color: var(--primary-line); background: var(--primary-soft); }
 .account-main { display: flex; align-items: center; gap: 14px; }
@@ -728,6 +738,11 @@ td.row-actions { white-space: nowrap; }
   .quick-footer { flex-wrap: wrap; }
   .shortcut-note { display: none; }
   .results-toolbar { align-items: stretch; flex-direction: column; gap: 10px; }
+  .verify-controls { align-items: stretch; flex-direction: column; }
+  .verify-controls .segmented { width: 100%; }
+  .verify-controls .input { max-width: none; }
+  .account-main { flex-wrap: wrap; }
+  .account-actions { width: 100%; justify-content: flex-start; }
   /* Clear the bottom navigation bar. */
   .to-top { bottom: 84px; }
 }
