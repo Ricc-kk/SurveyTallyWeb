@@ -6,6 +6,8 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type DragEvent,
+  type HTMLAttributes,
   type ReactNode,
 } from "react"
 import type { Session } from "@supabase/supabase-js"
@@ -471,6 +473,40 @@ const OUTLINE_KEY = "tallyform.outline"
 const OUTLINE_MIN = 210
 const OUTLINE_MAX = 460
 const RESULTS_PANEL_KEY = "tallyform.resultsPanel"
+
+// ---------------------------------------------------------------------------
+// Result card order
+// ---------------------------------------------------------------------------
+// Reordering the cards is a reading preference and never touches the survey, so
+// the builder, the tally flow and the CSV exports keep the question order they
+// already had. Held as one map keyed by survey id rather than a key per survey,
+// so a deleted survey does not leave an entry behind forever.
+
+const RESULT_ORDER_KEY = "tallyform.resultOrder"
+
+function loadResultOrder(surveyId: string): string[] {
+  try {
+    const raw = window.localStorage.getItem(RESULT_ORDER_KEY)
+    if (!raw) return []
+    const order = (JSON.parse(raw) as Record<string, unknown>)[surveyId]
+    if (!Array.isArray(order)) return []
+    return order.filter((id): id is string => typeof id === "string")
+  } catch {
+    return []
+  }
+}
+
+function saveResultOrder(surveyId: string, order: string[]) {
+  try {
+    const raw = window.localStorage.getItem(RESULT_ORDER_KEY)
+    const all = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>
+    if (order.length === 0) delete all[surveyId]
+    else all[surveyId] = order
+    window.localStorage.setItem(RESULT_ORDER_KEY, JSON.stringify(all))
+  } catch {
+    // Card order is best-effort.
+  }
+}
 const RESULTS_PANEL_MIN = 210
 const RESULTS_PANEL_MAX = 420
 
@@ -4057,6 +4093,17 @@ function ResultsView({
 }) {
   const [tab, setTab] = useState<"summary" | "responses">("summary")
   const [editing, setEditing] = useState<ResponseRecord | null>(null)
+  const [order, setOrder] = useState<string[]>([])
+  const [draggingId, setDraggingId] = useState("")
+  const [dropTargetId, setDropTargetId] = useState("")
+
+  // Results stays mounted while the survey picker swaps surveys underneath it,
+  // so the saved order has to be re-read whenever the survey changes.
+  useEffect(() => {
+    setOrder(loadResultOrder(survey.id))
+    setDraggingId("")
+    setDropTargetId("")
+  }, [survey.id])
   const panelListRef = useRef<HTMLDivElement>(null)
   const {
     pref: panel,
@@ -4070,7 +4117,72 @@ function ResultsView({
     260,
     panelListRef,
   )
-  const questions = survey.questions.filter((q) => q.type !== "section")
+  const questions = useMemo(
+    () => survey.questions.filter((q) => q.type !== "section"),
+    [survey.questions],
+  )
+
+  // Saved order first, then whatever it has never heard of. A question added
+  // since the last drag lands at the end rather than disappearing, and one that
+  // was deleted simply drops out.
+  const orderedQuestions = useMemo(() => {
+    if (order.length === 0) return questions
+    const byId = new Map(questions.map((question) => [question.id, question]))
+    const placed = new Set<string>()
+    const result: Question[] = []
+    for (const id of order) {
+      const question = byId.get(id)
+      if (question && !placed.has(id)) {
+        result.push(question)
+        placed.add(id)
+      }
+    }
+    for (const question of questions) {
+      if (!placed.has(question.id)) result.push(question)
+    }
+    return result
+  }, [questions, order])
+
+  const reorderCards = (sourceId: string, targetId: string) => {
+    if (!sourceId || sourceId === targetId) return
+    const next = [...orderedQuestions]
+    const from = next.findIndex((question) => question.id === sourceId)
+    const to = next.findIndex((question) => question.id === targetId)
+    if (from < 0 || to < 0) return
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    const ids = next.map((question) => question.id)
+    setOrder(ids)
+    saveResultOrder(survey.id, ids)
+  }
+
+  const resetOrder = () => {
+    setOrder([])
+    saveResultOrder(survey.id, [])
+  }
+
+  const cardDrag = (questionId: string): HTMLAttributes<HTMLElement> => ({
+    draggable: true,
+    onDragStart: (event: DragEvent<HTMLElement>) => {
+      event.dataTransfer.setData("text/plain", questionId)
+      setDraggingId(questionId)
+    },
+    onDragEnd: () => {
+      setDraggingId("")
+      setDropTargetId("")
+    },
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      if (dropTargetId !== questionId) setDropTargetId(questionId)
+    },
+    onDragLeave: () => setDropTargetId(""),
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      reorderCards(event.dataTransfer.getData("text/plain"), questionId)
+      setDraggingId("")
+      setDropTargetId("")
+    },
+  })
   // One row per question per response, so the first two columns are always the
   // question and its answer — that is the shape people read in Excel. The wide
   // one-row-per-response pivot stays available for pivoting and charting.
@@ -4272,6 +4384,12 @@ function ResultsView({
             Individual responses
           </button>
         </div>
+        {order.length > 0 && (
+          <Button onClick={resetOrder}>
+            <Icon name="undo" />
+            Reset order
+          </Button>
+        )}
         {survey.responses.length > 0 && (
           <Button
             variant="danger"
@@ -4297,12 +4415,15 @@ function ResultsView({
         />
       ) : (
         <div className="results-grid">
-          {questions.map((question, index) => (
+          {orderedQuestions.map((question, index) => (
             <ResultCard
               question={question}
               questionNumber={index + 1}
               responses={survey.responses}
               key={question.id}
+              cardDrag={cardDrag(question.id)}
+              dragging={draggingId === question.id}
+              dropTarget={dropTargetId === question.id}
             />
           ))}
         </div>
@@ -4340,10 +4461,19 @@ function ResultCard({
   question,
   questionNumber,
   responses,
+  cardDrag,
+  dragging,
+  dropTarget,
 }: {
   question: Question
   questionNumber: number
   responses: ResponseRecord[]
+  // Dragging is a display preference, so the handlers are passed in rather than
+  // owned here: every card type renders a different <article> but behaves the
+  // same way.
+  cardDrag: HTMLAttributes<HTMLElement>
+  dragging?: boolean
+  dropTarget?: boolean
 }) {
   const values = responses
     .map((r) => r.answers[question.id])
@@ -4356,7 +4486,10 @@ function ResultCard({
       ).length,
     }))
     return (
-      <article className="result-card">
+      <article
+        className={`result-card ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""}`}
+        {...cardDrag}
+      >
         <div className="result-head">
           <div>
             <span>
@@ -4395,7 +4528,10 @@ function ResultCard({
       ? numbers.reduce((a, b) => a + b, 0) / numbers.length
       : 0
     return (
-      <article className="result-card numeric-result">
+      <article
+        className={`result-card numeric-result ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""}`}
+        {...cardDrag}
+      >
         <div className="result-head">
           <div>
             <span>
@@ -4460,7 +4596,10 @@ function ResultCard({
     )
   }
   return (
-    <article className="result-card text-result">
+    <article
+      className={`result-card text-result ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""}`}
+      {...cardDrag}
+    >
       <div className="result-head">
         <div>
           <span>

@@ -569,7 +569,12 @@ td.row-actions { white-space: nowrap; }
 .results-metrics .metric span { color: var(--on-panel-3); }
 .results-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 24px 0 17px; }
 .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.result-card { padding: 22px; }
+.result-card { padding: 22px; cursor: grab; }
+/* The whole card is the drag surface, matching how the builder's question list
+   behaves. Opacity marks the card in hand, the outline marks where it lands. */
+.result-card:active { cursor: grabbing; }
+.result-card.dragging { opacity: .4; }
+.result-card.drop-target { outline: 2px solid var(--primary); outline-offset: 2px; }
 .result-head { padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); margin-bottom: 18px; }
 .result-head span { color: var(--primary); text-transform: uppercase; font-size: 9px; font-weight: 800; letter-spacing: .09em; }
 .result-head h3 { font-size: 16px; margin-top: 5px; }
