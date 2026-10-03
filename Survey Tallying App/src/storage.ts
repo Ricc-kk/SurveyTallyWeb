@@ -1,5 +1,6 @@
 import type { Answer, Question, ResponseRecord, Survey } from "./types"
 import { seedSurvey } from "./data"
+import { getUserId } from "./auth"
 import { MISSING_ENV_MESSAGE, supabase } from "./lib/supabase"
 
 // The app used to persist to local storage under this key. It is cleared on the
@@ -28,9 +29,20 @@ type ResponseRow = {
   updated_at: string
 }
 
-function toSurveyRow(survey: Survey) {
+/**
+ * Row Level Security rejects any write whose user_id is not the signed-in user,
+ * so ownership is stamped on every insert and update.
+ */
+function requireUserId(): string {
+  const userId = getUserId()
+  if (!userId) throw new Error("You must be signed in to reach your surveys.")
+  return userId
+}
+
+function toSurveyRow(survey: Survey, userId: string) {
   return {
     id: survey.id,
+    user_id: userId,
     title: survey.title,
     description: survey.description,
     identifier_label: survey.identifierLabel,
@@ -43,10 +55,15 @@ function toSurveyRow(survey: Survey) {
   }
 }
 
-function toResponseRow(surveyId: string, record: ResponseRecord) {
+function toResponseRow(
+  surveyId: string,
+  record: ResponseRecord,
+  userId: string,
+) {
   return {
     id: record.id,
     survey_id: surveyId,
+    user_id: userId,
     identifier: record.identifier,
     answers: record.answers,
     created_at: record.createdAt,
@@ -107,6 +124,8 @@ function toSurvey(row: SurveyRow, responses: ResponseRow[]): Survey {
 export async function loadSurveys(): Promise<Survey[]> {
   if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
 
+  const userId = requireUserId()
+
   localStorage.removeItem(LEGACY_STORAGE_KEY)
 
   const [surveysResult, responsesResult] = await Promise.all([
@@ -123,7 +142,9 @@ export async function loadSurveys(): Promise<Survey[]> {
   const surveyRows = (surveysResult.data ?? []) as SurveyRow[]
   if (surveyRows.length === 0) {
     const seed = seedSurvey()
-    const { error } = await supabase.from("surveys").upsert(toSurveyRow(seed))
+    const { error } = await supabase
+      .from("surveys")
+      .upsert(toSurveyRow(seed, userId))
     if (error) throw new Error(error.message)
     return [seed]
   }
@@ -140,6 +161,8 @@ export async function loadSurveys(): Promise<Survey[]> {
 
 async function performSync(current: Survey[], previous: Survey[]): Promise<void> {
   if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
+
+  const userId = requireUserId()
 
   const previousById = new Map(previous.map((survey) => [survey.id, survey]))
   const currentIds = new Set(current.map((survey) => survey.id))
@@ -193,7 +216,7 @@ async function performSync(current: Survey[], previous: Survey[]): Promise<void>
   if (surveysToUpsert.length > 0) {
     const { error } = await supabase
       .from("surveys")
-      .upsert(surveysToUpsert.map(toSurveyRow))
+      .upsert(surveysToUpsert.map((survey) => toSurveyRow(survey, userId)))
     if (error) throw new Error(error.message)
   }
 
@@ -201,7 +224,11 @@ async function performSync(current: Survey[], previous: Survey[]): Promise<void>
   if (responsesToUpsert.length > 0) {
     const { error } = await supabase
       .from("responses")
-      .upsert(responsesToUpsert.map(({ surveyId, record }) => toResponseRow(surveyId, record)))
+      .upsert(
+        responsesToUpsert.map(({ surveyId, record }) =>
+          toResponseRow(surveyId, record, userId),
+        ),
+      )
     if (error) throw new Error(error.message)
   }
 

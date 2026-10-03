@@ -6,7 +6,14 @@ import {
   type ChangeEvent,
   type ReactNode,
 } from "react"
+import type { Session } from "@supabase/supabase-js"
 import { makeQuestion, makeSurvey, uid } from "./data"
+import {
+  initAuth,
+  signOut as signOutOfSupabase,
+  subscribeToSession,
+} from "./auth"
+import LoginScreen from "./LoginScreen"
 import {
   describeStorageError,
   downloadFile,
@@ -302,11 +309,45 @@ function App() {
   const [view, setView] = useState<View>("surveys")
   const [notice, setNotice] = useState("")
   const [loading, setLoading] = useState(true)
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(false)
   const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
   useEffect(() => {
     let cancelled = false
+    initAuth()
+      .then((active) => {
+        if (!cancelled) setSession(active)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setNotice(describeStorageError(error))
+      })
+      .finally(() => {
+        if (!cancelled) setAuthReady(true)
+      })
+    const unsubscribe = subscribeToSession(setSession)
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
+  // Runs on sign-in and clears the workspace on sign-out, so one account's
+  // surveys can never linger on screen after switching.
+  useEffect(() => {
+    if (!authReady) return
+
+    if (!session) {
+      syncedRef.current = []
+      setSurveys([])
+      setSelectedId("")
+      setLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setLoading(true)
     loadSurveys()
       .then((loaded) => {
         if (cancelled) return
@@ -324,10 +365,10 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [session, authReady])
 
   useEffect(() => {
-    if (loading) return
+    if (loading || !session) return
     const previous = syncedRef.current
     const timer = window.setTimeout(() => {
       syncSurveys(surveys, previous)
@@ -339,7 +380,7 @@ function App() {
         })
     }, SYNC_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [surveys, loading])
+  }, [surveys, loading, session])
 
   useEffect(() => {
     if (!notice) return
@@ -367,6 +408,16 @@ function App() {
     setSurveys((current) => [created, ...current])
     openSurvey(created.id, "builder")
   }
+
+  if (!authReady) {
+    return (
+      <div className="empty-state">
+        <h3>Loading…</h3>
+      </div>
+    )
+  }
+
+  if (!session) return <LoginScreen />
 
   if (loading) {
     return (
@@ -423,9 +474,20 @@ function App() {
         <div className="sidebar-foot">
           <div className="privacy-dot" />
           <div>
-            <strong>Synced to Supabase</strong>
-            <span>Shared workspace, no account</span>
+            <strong>Signed in</strong>
+            <span>Private to your account</span>
           </div>
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => {
+              void signOutOfSupabase().catch((error: unknown) => {
+                setNotice(describeStorageError(error))
+              })
+            }}
+          >
+            Sign out
+          </button>
         </div>
       </aside>
 
