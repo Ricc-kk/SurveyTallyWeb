@@ -178,7 +178,7 @@ h2 { letter-spacing: -.025em; }
 .sidebar-resizer { position: absolute; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; z-index: 2; }
 .nav-left .sidebar-resizer { right: -5px; }
 .nav-right .sidebar-resizer { left: -5px; }
-.app-shell.nav-right .to-top { right: calc(var(--nav-w) + 24px); }
+
 .brand { border: 0; background: transparent; color: inherit; display: flex; align-items: center; gap: 11px; font-size: 19px; font-weight: 750; cursor: grab; padding: 0 10px 32px; letter-spacing: -.02em; touch-action: none; user-select: none; }
 .brand:active { cursor: grabbing; }
 .brand > .icon { color: var(--on-panel-4); flex: 0 0 auto; }
@@ -249,7 +249,11 @@ h2 { letter-spacing: -.025em; }
 .new-card strong { color: var(--ink); }
 .new-card small { font-size: 12px; }
 .toast { position: fixed; right: 24px; bottom: 88px; color: var(--on-panel); background: var(--panel-soft); border-radius: 11px; padding: 13px 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; z-index: 50; animation: toast-in .25s ease-out; }
-.to-top { position: fixed; right: 24px; bottom: 24px; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); display: grid; place-items: center; cursor: pointer; z-index: 45; transition: transform .18s ease, border-color .18s ease; }
+/* Bottom-centre. The sidebar and the docked questions panel both claim an edge
+   of the viewport, so a corner button ended up behind one or on top of the other.
+   Centring it clears both, and the negative margin keeps the hover lift from
+   fighting with a translate used for centring. */
+.to-top { position: fixed; left: 50%; margin-left: -22px; bottom: 24px; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); display: grid; place-items: center; cursor: pointer; z-index: 45; transition: transform .18s ease, border-color .18s ease; }
 .to-top:hover { transform: translateY(-2px); border-color: var(--line-strong); }
 
 .login-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--canvas); }
@@ -292,11 +296,6 @@ h2 { letter-spacing: -.025em; }
 .app-shell.nav-left .builder-layout.outline-left:not(.outline-floating) .builder-outline { left: var(--nav-w); }
 .app-shell.nav-right .builder-layout.outline-left:not(.outline-floating) .builder-outline { left: 0; }
 
-/* The docked panel owns the edge it is docked to, so the floating back-to-top
-   button moves to the opposite corner instead of sitting on top of it. Scoped
-   to the visible pane, since hidden views stay mounted and would otherwise
-   answer for whichever panel happens to be off screen. */
-.app-shell:has(.view-pane:not([hidden]) .builder-layout.outline-right:not(.outline-floating)) .to-top { right: auto; left: 24px; }
 .outline-resizer { position: absolute; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; }
 .outline-right .outline-resizer { left: -5px; }
 .outline-left .outline-resizer { right: -5px; }
@@ -665,4 +664,6 @@ td.row-actions { white-space: nowrap; }
   .quick-footer { flex-wrap: wrap; }
   .shortcut-note { display: none; }
   .results-toolbar { align-items: stretch; flex-direction: column; gap: 10px; }
+  /* Clear the bottom navigation bar. */
+  .to-top { bottom: 84px; }
 }

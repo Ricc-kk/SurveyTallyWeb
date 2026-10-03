@@ -624,6 +624,9 @@ function csvCell(value: unknown) {
 // instead of firing a request per keystroke.
 const SYNC_DEBOUNCE_MS = 700
 
+/** How long the back-to-top button lingers after the last scroll event. */
+const TO_TOP_HIDE_MS = 3000
+
 function App() {
   const [surveys, setSurveys] = useState<Survey[]>([])
   const [selectedId, setSelectedId] = useState<string>("")
@@ -645,6 +648,7 @@ function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
   const [showToTop, setShowToTop] = useState(false)
+  const toTopTimerRef = useRef(0)
   const [nav, setNav] = useState<NavPref>(loadNavPref)
   const edgeScroll = useEdgeAutoScroll()
   // Dragging the brand ends with a click the browser fires on the button, which
@@ -796,10 +800,26 @@ function App() {
   }, [notice])
 
   useEffect(() => {
-    const onScroll = () => setShowToTop(window.scrollY > 400)
+    const onScroll = () => {
+      if (window.scrollY <= 400) {
+        setShowToTop(false)
+        return
+      }
+      setShowToTop(true)
+      // It lives while you are scrolling and steps aside once you stop, instead
+      // of sitting on the page for the rest of the session.
+      window.clearTimeout(toTopTimerRef.current)
+      toTopTimerRef.current = window.setTimeout(
+        () => setShowToTop(false),
+        TO_TOP_HIDE_MS,
+      )
+    }
     onScroll()
     window.addEventListener("scroll", onScroll, { passive: true })
-    return () => window.removeEventListener("scroll", onScroll)
+    return () => {
+      window.removeEventListener("scroll", onScroll)
+      window.clearTimeout(toTopTimerRef.current)
+    }
   }, [])
 
   // Each view remembers where you scrolled to, so moving between tabs puts you
