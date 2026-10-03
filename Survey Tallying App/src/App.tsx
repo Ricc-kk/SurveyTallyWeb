@@ -70,6 +70,18 @@ const Icon = ({ name, size = 18 }: { name: string; size?: number }) => {
       </>
     ),
     plus: <path d="M12 5v14M5 12h14" />,
+    dock: (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M15 4v16" />
+      </>
+    ),
+    float: (
+      <>
+        <rect x="3" y="3" width="17" height="13" rx="2" />
+        <rect x="8" y="9" width="13" height="12" rx="2" />
+      </>
+    ),
     close: <path d="M6 6l12 12M18 6 6 18" />,
     search: (
       <>
@@ -175,6 +187,69 @@ function Field({
 
 function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input className="input" {...props} />
+}
+
+// How close to an edge the pointer has to get before a drag starts scrolling,
+// and how fast it goes once there.
+const EDGE_SCROLL_ZONE = 76
+const EDGE_SCROLL_MAX = 18
+
+function edgeSpeed(distance: number) {
+  return Math.round((distance / EDGE_SCROLL_ZONE) * EDGE_SCROLL_MAX)
+}
+
+/**
+ * Scrolls the page while a drag hovers near the top or bottom of the viewport,
+ * and the given container while the pointer is near its own edges — so a
+ * question can be dragged past the end of a long list, or a panel past the
+ * bottom of the page, instead of having nowhere left to drop it.
+ *
+ * Driven by a timer rather than pointer events, which stop firing the moment
+ * the pointer is held still at the edge — exactly when the scrolling should
+ * continue. Not requestAnimationFrame either: rAF is suspended whenever the
+ * page is not painting, which would freeze the drag in an embedded webview or
+ * a background tab. The loop only runs for the duration of a drag.
+ */
+function useEdgeAutoScroll(inner?: { current: HTMLElement | null }) {
+  const pointerY = useRef<number | null>(null)
+  const timer = useRef<number | null>(null)
+
+  const stop = () => {
+    pointerY.current = null
+    if (timer.current !== null) window.clearInterval(timer.current)
+    timer.current = null
+  }
+
+  const tick = () => {
+    const y = pointerY.current
+    if (y === null) return
+    const fromTop = EDGE_SCROLL_ZONE - y
+    const fromBottom = y - (window.innerHeight - EDGE_SCROLL_ZONE)
+    if (fromTop > 0) window.scrollBy(0, -edgeSpeed(fromTop))
+    else if (fromBottom > 0) window.scrollBy(0, edgeSpeed(fromBottom))
+
+    const el = inner?.current
+    if (el) {
+      const box = el.getBoundingClientRect()
+      if (y > box.top && y < box.bottom) {
+        const belowTop = y - box.top
+        const aboveBottom = box.bottom - y
+        if (belowTop < EDGE_SCROLL_ZONE)
+          el.scrollTop -= edgeSpeed(EDGE_SCROLL_ZONE - belowTop)
+        else if (aboveBottom < EDGE_SCROLL_ZONE)
+          el.scrollTop += edgeSpeed(EDGE_SCROLL_ZONE - aboveBottom)
+      }
+    }
+  }
+
+  const track = (y: number) => {
+    pointerY.current = y
+    if (timer.current === null) timer.current = window.setInterval(tick, 16)
+  }
+
+  useEffect(() => stop, [])
+
+  return { track, stop }
 }
 
 function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
@@ -344,7 +419,38 @@ function questionNumbers(questions: Question[]): Array<number | null> {
 type OutlinePref = {
   side: "left" | "right"
   collapsed: boolean
+  floating: boolean
   width: number
+}
+
+type NavPref = {
+  side: "left" | "right"
+  width: number
+}
+
+const NAV_KEY = "tallyform.nav"
+const NAV_MIN = 204
+const NAV_MAX = 420
+
+function loadNavPref(): NavPref {
+  try {
+    const raw = window.localStorage.getItem(NAV_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<NavPref>
+      if (parsed.side === "left" || parsed.side === "right") {
+        return {
+          side: parsed.side,
+          width: Math.min(
+            NAV_MAX,
+            Math.max(NAV_MIN, Number(parsed.width) || 232),
+          ),
+        }
+      }
+    }
+  } catch {
+    // Fall through to defaults if storage is unavailable.
+  }
+  return { side: "left", width: 232 }
 }
 
 const OUTLINE_KEY = "tallyform.outline"
@@ -360,6 +466,7 @@ function loadOutlinePref(): OutlinePref {
         return {
           side: parsed.side,
           collapsed: Boolean(parsed.collapsed),
+          floating: Boolean(parsed.floating),
           width: Math.min(
             OUTLINE_MAX,
             Math.max(OUTLINE_MIN, Number(parsed.width) || 260),
@@ -370,7 +477,7 @@ function loadOutlinePref(): OutlinePref {
   } catch {
     // Fall through to defaults if storage is unavailable.
   }
-  return { side: "right", collapsed: false, width: 260 }
+  return { side: "right", collapsed: false, floating: false, width: 260 }
 }
 
 function csvCell(value: unknown) {
@@ -395,6 +502,12 @@ function App() {
   const [authReady, setAuthReady] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
   const [showToTop, setShowToTop] = useState(false)
+  const [nav, setNav] = useState<NavPref>(loadNavPref)
+  const edgeScroll = useEdgeAutoScroll()
+  // Dragging the brand ends with a click the browser fires on the button, which
+  // would also trigger "go home". A deadline rather than a flag, so a drag that
+  // ends off the button and never produces a click can't swallow the next one.
+  const brandClickBlockedUntilRef = useRef(0)
   const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
@@ -546,14 +659,87 @@ function App() {
     )
   }
 
+  const setNavPref = (patch: Partial<NavPref>) =>
+    setNav((current) => {
+      const next = { ...current, ...patch }
+      try {
+        window.localStorage.setItem(NAV_KEY, JSON.stringify(next))
+      } catch {
+        // Layout preference is best-effort.
+      }
+      return next
+    })
+
+  /** Drag the inner edge to resize; the sidebar grows away from the content. */
+  const startNavResize = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = nav.width
+    edgeScroll.track(event.clientY)
+    const onMove = (move: PointerEvent) => {
+      edgeScroll.track(move.clientY)
+      const delta =
+        nav.side === "left" ? move.clientX - startX : startX - move.clientX
+      setNavPref({
+        width: Math.min(
+          NAV_MAX,
+          Math.max(NAV_MIN, Math.round(startWidth + delta)),
+        ),
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  /** Drag the brand left or right to swap which side the sidebar sits on. */
+  const startNavMove = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    edgeScroll.track(event.clientY)
+    const onMove = (move: PointerEvent) => edgeScroll.track(move.clientY)
+    const onUp = (up: PointerEvent) => {
+      const delta = up.clientX - startX
+      if (Math.abs(delta) > 60) {
+        brandClickBlockedUntilRef.current = Date.now() + 250
+        setNavPref({ side: delta > 0 ? "right" : "left" })
+      }
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell nav-${nav.side}`}
+      style={{ "--nav-w": `${nav.width}px` } as React.CSSProperties}
+    >
       <aside className="sidebar">
+        <span
+          className="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          onPointerDown={startNavResize}
+        />
         <button
           className="brand"
-          onClick={() => setView("surveys")}
+          onPointerDown={startNavMove}
+          title="Drag to move the sidebar to the other side"
+          onClick={() => {
+            if (Date.now() < brandClickBlockedUntilRef.current) return
+            setView("surveys")
+          }}
           aria-label="Tallyform home"
         >
+          <Icon name="grip" size={14} />
           <span className="brand-mark">
             <Icon name="check" size={19} />
           </span>
@@ -939,6 +1125,8 @@ function SurveyBuilder({
   const [insertPosition, setInsertPosition] = useState("end")
   const [pendingType, setPendingType] = useState<QuestionType>("single")
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([])
+  const outlineListRef = useRef<HTMLDivElement>(null)
+  const edgeScroll = useEdgeAutoScroll(outlineListRef)
   const update = (patch: Partial<Survey>) => onChange({ ...survey, ...patch })
 
   const setOutlinePref = (patch: Partial<OutlinePref>) =>
@@ -957,7 +1145,9 @@ function SurveyBuilder({
     event.preventDefault()
     const startX = event.clientX
     const startWidth = outline.width
+    edgeScroll.track(event.clientY)
     const onMove = (move: PointerEvent) => {
+      edgeScroll.track(move.clientY)
       const delta =
         outline.side === "right" ? startX - move.clientX : move.clientX - startX
       setOutlinePref({
@@ -970,6 +1160,7 @@ function SurveyBuilder({
     const onUp = () => {
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
     }
     window.addEventListener("pointermove", onMove)
     window.addEventListener("pointerup", onUp)
@@ -979,13 +1170,18 @@ function SurveyBuilder({
   const startMove = (event: React.PointerEvent) => {
     event.preventDefault()
     const startX = event.clientX
+    edgeScroll.track(event.clientY)
+    const onMove = (move: PointerEvent) => edgeScroll.track(move.clientY)
     const onUp = (up: PointerEvent) => {
       const delta = up.clientX - startX
       if (Math.abs(delta) > 60) {
         setOutlinePref({ side: delta > 0 ? "right" : "left" })
       }
+      window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
     }
+    window.addEventListener("pointermove", onMove)
     window.addEventListener("pointerup", onUp)
   }
 
@@ -1122,7 +1318,7 @@ function SurveyBuilder({
       <div
           className={`builder-layout outline-${outline.side}${
             outline.collapsed ? " outline-collapsed" : ""
-          }`}
+          }${outline.floating ? " outline-floating" : ""}`}
           style={{ "--outline-w": `${outline.width}px` } as React.CSSProperties}
         >
           <aside className="builder-outline">
@@ -1143,6 +1339,26 @@ function SurveyBuilder({
               <span className="outline-count">
                 {survey.questions.filter((q) => q.type !== "section").length}
               </span>
+              <button
+                className="outline-float"
+                type="button"
+                aria-label={
+                  outline.floating
+                    ? "Dock the question panel"
+                    : "Float the question panel"
+                }
+                aria-pressed={outline.floating}
+                title={
+                  outline.floating
+                    ? "Dock the question panel"
+                    : "Float the question panel"
+                }
+                onClick={() =>
+                  setOutlinePref({ floating: !outline.floating })
+                }
+              >
+                <Icon name={outline.floating ? "dock" : "float"} size={14} />
+              </button>
               <button
                 className="outline-collapse"
                 type="button"
@@ -1172,7 +1388,16 @@ function SurveyBuilder({
               Add question
             </button>
           </div>
-          <div className="question-list">
+          <div
+            className="question-list"
+            ref={outlineListRef}
+            onDragOver={(event) => {
+              event.preventDefault()
+              edgeScroll.track(event.clientY)
+            }}
+            onDrop={edgeScroll.stop}
+            onDragLeave={edgeScroll.stop}
+          >
             {survey.questions.map((question, index) => (
               <button
                 key={question.id}
@@ -1180,9 +1405,11 @@ function SurveyBuilder({
                 className={`question-list-item ${
                   selected === question.id ? "active" : ""
                 }`}
-                onDragStart={(event) =>
+                onDragStart={(event) => {
                   event.dataTransfer.setData("text/plain", question.id)
-                }
+                  edgeScroll.track(event.clientY)
+                }}
+                onDragEnd={edgeScroll.stop}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => {
                   event.preventDefault()

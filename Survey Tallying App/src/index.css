@@ -170,9 +170,18 @@ h2 { letter-spacing: -.025em; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .icon { flex: 0 0 auto; }
 
-.app-shell { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
-.sidebar { position: sticky; top: 0; height: 100vh; padding: 28px 18px 22px; background: var(--panel); color: var(--on-panel); display: flex; flex-direction: column; z-index: 10; }
-.brand { border: 0; background: transparent; color: inherit; display: flex; align-items: center; gap: 11px; font-size: 19px; font-weight: 750; cursor: pointer; padding: 0 10px 32px; letter-spacing: -.02em; }
+.app-shell { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 100vh; }
+.app-shell.nav-left { grid-template-columns: var(--nav-w) minmax(0, 1fr); }
+.app-shell.nav-right { grid-template-columns: minmax(0, 1fr) var(--nav-w); }
+.app-shell.nav-right .sidebar { order: 1; }
+.sidebar { position: sticky; top: 0; min-width: 0; height: 100vh; padding: 28px 18px 22px; background: var(--panel); color: var(--on-panel); display: flex; flex-direction: column; z-index: 10; }
+.sidebar-resizer { position: absolute; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; z-index: 2; }
+.nav-left .sidebar-resizer { right: -5px; }
+.nav-right .sidebar-resizer { left: -5px; }
+.app-shell.nav-right .to-top { right: calc(var(--nav-w) + 24px); }
+.brand { border: 0; background: transparent; color: inherit; display: flex; align-items: center; gap: 11px; font-size: 19px; font-weight: 750; cursor: grab; padding: 0 10px 32px; letter-spacing: -.02em; touch-action: none; user-select: none; }
+.brand:active { cursor: grabbing; }
+.brand > .icon { color: var(--on-panel-4); flex: 0 0 auto; }
 .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--primary); color: var(--on-primary); }
 .nav { display: grid; gap: 6px; }
 .nav-item { border: 0; background: transparent; color: var(--on-panel-3); height: 44px; padding: 0 12px; border-radius: 10px; display: flex; align-items: center; gap: 12px; cursor: pointer; font-weight: 600; }
@@ -266,6 +275,26 @@ h2 { letter-spacing: -.025em; }
 .builder-layout.outline-right .builder-outline { order: 1; }
 .builder-editor { min-width: 0; }
 .builder-outline { position: sticky; top: 20px; min-width: 0; max-height: calc(100vh - 40px); display: flex; flex-direction: column; background: var(--surface-sunken); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 15px; }
+
+/* Docked (the default): the panel is page chrome rather than a floating card.
+   It is fixed to the viewport so it spans the full height from the top instead
+   of starting below the page header and hanging past the fold. The grid track
+   still reserves its width, so the editor does not move. Floating mode drops
+   all of this and goes back to a sticky inset card. */
+.builder-layout.outline-right:not(.outline-floating) .builder-outline,
+.builder-layout.outline-left:not(.outline-floating) .builder-outline { position: fixed; top: 0; height: 100vh; max-height: 100vh; width: var(--outline-w); border-radius: 0; }
+.builder-layout.outline-right:not(.outline-floating) .builder-outline { border-right: 0; }
+.builder-layout.outline-left:not(.outline-floating) .builder-outline { border-left: 0; }
+
+/* Clear of the main sidebar, whichever side either of them is mounted on. */
+.app-shell.nav-left .builder-layout.outline-right:not(.outline-floating) .builder-outline { right: 0; }
+.app-shell.nav-right .builder-layout.outline-right:not(.outline-floating) .builder-outline { right: var(--nav-w); }
+.app-shell.nav-left .builder-layout.outline-left:not(.outline-floating) .builder-outline { left: var(--nav-w); }
+.app-shell.nav-right .builder-layout.outline-left:not(.outline-floating) .builder-outline { left: 0; }
+
+/* The docked panel owns the edge it is docked to, so the floating back-to-top
+   button moves to the opposite corner instead of sitting on top of it. */
+.app-shell:has(.builder-layout.outline-right:not(.outline-floating)) .to-top { right: auto; left: 24px; }
 .outline-resizer { position: absolute; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; }
 .outline-right .outline-resizer { left: -5px; }
 .outline-left .outline-resizer { right: -5px; }
@@ -276,11 +305,14 @@ h2 { letter-spacing: -.025em; }
 .outline-count { color: var(--muted); font-size: 12px; font-weight: 700; }
 .outline-collapse { width: 26px; height: 26px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
 .outline-collapse:hover { color: var(--ink); border-color: var(--line-strong); }
+.outline-float { width: 26px; height: 26px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.outline-float:hover { color: var(--ink); border-color: var(--line-strong); }
 .builder-layout.outline-collapsed { --outline-w: 64px; }
 .builder-layout.outline-collapsed .builder-outline { padding: 12px 8px; }
 .builder-layout.outline-collapsed .outline-title,
 .builder-layout.outline-collapsed .outline-count { display: none; }
 .builder-layout.outline-collapsed .outline-resizer { display: none; }
+.builder-layout.outline-collapsed .outline-float { display: none; }
 .builder-layout.outline-collapsed .outline-collapse .icon { transform: rotate(90deg); }
 .panel-title { display: flex; justify-content: space-between; padding: 5px 6px 13px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 /* Only the question list scrolls: the panel header and the add menu stay put, and
@@ -497,6 +529,7 @@ tbody tr:hover { background: var(--surface-raised); }
 @media (max-width: 780px) {
   .app-shell { display: block; padding-bottom: 68px; }
   .sidebar { position: fixed; top: auto; bottom: 0; width: 100%; height: 68px; padding: 8px 12px; flex-direction: row; align-items: center; z-index: 40; }
+  .sidebar-resizer { display: none; }
   .brand, .sidebar-foot, .theme-switch, .sync-note { display: none; }
   .nav { width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
   .nav-item { height: 52px; justify-content: center; flex-direction: column; gap: 3px; padding: 3px; font-size: 10px; }
@@ -513,6 +546,12 @@ tbody tr:hover { background: var(--surface-raised); }
   .builder-page { padding: 22px 14px; }
   .builder-layout { display: block; }
   .builder-outline { position: static; max-height: none; margin-bottom: 15px; }
+  .builder-layout.outline-right:not(.outline-floating) .builder-outline,
+  .builder-layout.outline-left:not(.outline-floating) .builder-outline { position: static; height: auto; max-height: none; width: auto; margin: 0 0 15px; border: 1px solid var(--line-strong); border-radius: var(--radius); }
+  .app-shell.nav-left .builder-layout.outline-right:not(.outline-floating) .builder-outline,
+  .app-shell.nav-right .builder-layout.outline-right:not(.outline-floating) .builder-outline,
+  .app-shell.nav-left .builder-layout.outline-left:not(.outline-floating) .builder-outline,
+  .app-shell.nav-right .builder-layout.outline-left:not(.outline-floating) .builder-outline { right: auto; left: auto; top: auto; }
   .outline-resizer { display: none; }
   .question-list { flex: 0 0 auto; flex-direction: row; padding-right: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
   .question-list::-webkit-scrollbar { display: none; }
