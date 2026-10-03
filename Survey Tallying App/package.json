@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": "24.x"
   },
   "dependencies": {
     "react": "^19.0.0",
