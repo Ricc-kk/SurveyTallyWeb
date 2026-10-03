@@ -31,7 +31,7 @@ const TYPE_LABELS: Record<QuestionType, string> = {
   section: "Section",
 }
 
-const Icon = ({ name, size = 18 }: { name: string size?: number }) => {
+const Icon = ({ name, size = 18 }: { name: string; size?: number }) => {
   const paths: Record<string, ReactNode> = {
     surveys: (
       <>
@@ -650,7 +650,7 @@ function SurveyLibrary({
   )
 }
 
-function Metric({ value, label }: { value: number label: string }) {
+function Metric({ value, label }: { value: number; label: string }) {
   return (
     <div className="metric">
       <strong>{value}</strong>

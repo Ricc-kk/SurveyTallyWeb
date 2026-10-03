@@ -1,9 +1,28 @@
 import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import siteConfiguration from './.figma/make/site.json'
+
+/**
+ * Figma Make generates `.figma/make/site.json` inside the workspace. It is absent
+ * in a plain clone (and therefore on Vercel), so read it defensively and fall back
+ * to the built-in defaults instead of failing the whole config load.
+ */
+function loadSiteConfiguration(): FigmaSiteConfiguration {
+  const configPath = fileURLToPath(new URL('./.figma/make/site.json', import.meta.url))
+  if (!existsSync(configPath)) return {}
+
+  try {
+    return JSON.parse(readFileSync(configPath, 'utf-8')) as FigmaSiteConfiguration
+  } catch {
+    return {}
+  }
+}
+
+const siteConfiguration = loadSiteConfiguration()
 
 
 // Vite config — https://vitejs.dev/config/
@@ -27,7 +46,9 @@ react(),
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, './src'),
+        // `import.meta.dirname` instead of `__dirname`: Vite 8 warns that
+        // `__dirname` is unsupported once `configLoader: 'native'` becomes default.
+        '@': path.resolve(import.meta.dirname, './src'),
       },
     },
     server: {
