@@ -21,6 +21,7 @@ import LoginScreen from "./LoginScreen"
 import {
   AccountsUnavailableError,
   deleteAccount,
+  probeAccountsSchema,
   deleteFeedback,
   fetchMyAccount,
   listAccounts,
@@ -528,6 +529,15 @@ function saveFolderOrder(ids: string[]) {
 
 const UNFILED = ""
 
+/**
+ * Drag payloads are prefixed so a single drop handler can tell a survey from a
+ * folder. Stripping has to happen before the id is compared against anything,
+ * or every drop quietly does nothing.
+ */
+function stripPayload(payload: string, prefix: string): string {
+  return payload.startsWith(prefix) ? payload.slice(prefix.length) : payload
+}
+
 export interface FolderSection {
   folder: Folder | null
   surveys: Survey[]
@@ -841,6 +851,27 @@ function App() {
     checkAccount()
   }, [authReady, userId, checkAccount])
 
+  // Signed out, nothing can tell us the schema from the app state, so the login
+  // screen asks directly. This is what decides whether the Create account tab is
+  // offered at all: without the tables there is no way to tell an administrator
+  // from a visitor, so registration stays closed.
+  useEffect(() => {
+    if (!authReady || userId) return
+    let cancelled = false
+    probeAccountsSchema()
+      .then((available) => {
+        if (!cancelled) setAccountsOff(!available)
+      })
+      .catch(() => {
+        // A probe failure is treated as "not installed", which is the safe
+        // direction to fail in.
+        if (!cancelled) setAccountsOff(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authReady, userId])
+
   // The waiting room polls, so approving an account in another tab lets the
   // waiting user straight in without signing in again.
   const needsApproval = Boolean(account && !canAccess)
@@ -1061,7 +1092,7 @@ function App() {
     )
   }
 
-  if (!session) return <LoginScreen />
+  if (!session) return <LoginScreen canRegister={!accountsOff} />
 
   if (loading && !hasLoadedOnce) {
     return (
@@ -1306,16 +1337,10 @@ function App() {
               setNotice("Survey duplicated")
             }}
             onDelete={(id) => {
-              if (
-                window.confirm(
-                  "Delete this survey and all of its response data?",
-                )
-              ) {
-                setSurveys((current) =>
-                  current.filter((item) => item.id !== id),
-                )
-                setNotice("Survey deleted")
-              }
+              setSurveys((current) =>
+                current.filter((item) => item.id !== id),
+              )
+              setNotice("Survey deleted")
             }}
             onImport={(imported) => {
               setSurveys((current) => [
@@ -1437,24 +1462,193 @@ function NavItem({
   )
 }
 
+/** One pending destructive action, described well enough to act on. */
+type ConfirmRequest = {
+  title: string
+  body: ReactNode
+  confirmLabel: string
+  onConfirm: () => void
+}
+
+function ConfirmDialog({
+  request,
+  onClose,
+}: {
+  request: ConfirmRequest
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-body"
+      >
+        <span className="confirm-badge">
+          <Icon name="trash" size={20} />
+        </span>
+        <h2 id="confirm-title">{request.title}</h2>
+        <div className="confirm-body" id="confirm-body">
+          {request.body}
+        </div>
+        <footer>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="danger"
+            onClick={() => {
+              request.onConfirm()
+              onClose()
+            }}
+          >
+            <Icon name="trash" size={15} />
+            {request.confirmLabel}
+          </Button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+/**
+ * Puts a confirmation in front of every destructive action in one place.
+ *
+ * A component that owns deletes calls `ask(...)` and renders `dialog`. This
+ * replaced window.confirm, which cannot say what would be lost and blocks the
+ * main thread while it waits.
+ */
+function useConfirm() {
+  const [request, setRequest] = useState<ConfirmRequest | null>(null)
+  const ask = useCallback((next: ConfirmRequest) => setRequest(next), [])
+  const close = useCallback(() => setRequest(null), [])
+  const dialog = request ? (
+    <ConfirmDialog request={request} onClose={close} />
+  ) : null
+  return { ask, dialog }
+}
+
+type MenuAction = {
+  key: string
+  label: string
+  icon: string
+  tone?: "danger"
+  onSelect: () => void
+}
+
+/**
+ * The dots at a card's top right. Everything a card can do to itself apart from
+ * opening it sits behind here, so the card face stays about the survey instead
+ * of wearing three icon buttons.
+ */
+function ActionMenu({
+  label,
+  actions,
+}: {
+  label: string
+  actions: MenuAction[]
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  return (
+    <div className={`card-menu ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        className="btn btn-ghost card-menu-trigger"
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name="more" />
+      </button>
+      {open ? (
+        <div className="card-menu-pop" role="menu" aria-label={label}>
+          {actions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              role="menuitem"
+              className={`card-menu-item ${action.tone === "danger" ? "danger" : ""}`}
+              onClick={() => {
+                setOpen(false)
+                action.onSelect()
+              }}
+            >
+              <Icon name={action.icon} size={15} />
+              {action.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function SurveyCard({
   item,
   onOpen,
   onDuplicate,
-  onDelete,
+  onDeleteRequest,
 }: {
   item: Survey
   onOpen: (id: string, view: View) => void
   onDuplicate: (survey: Survey) => void
-  onDelete: (id: string) => void
+  onDeleteRequest: (survey: Survey) => void
 }) {
   return (
     <article className="survey-card">
       <div className="survey-card-top">
         <span className={`status status-${item.status}`}>{item.status}</span>
-        <Button variant="ghost" aria-label={`More actions for ${item.title}`}>
-          <Icon name="more" />
-        </Button>
+        <ActionMenu
+          label={`More actions for ${item.title}`}
+          actions={[
+            {
+              key: "edit",
+              label: "Edit survey",
+              icon: "builder",
+              onSelect: () => onOpen(item.id, "builder"),
+            },
+            {
+              key: "duplicate",
+              label: "Duplicate survey",
+              icon: "copy",
+              onSelect: () => onDuplicate(item),
+            },
+            {
+              key: "delete",
+              label: "Delete survey…",
+              icon: "trash",
+              tone: "danger",
+              onSelect: () => onDeleteRequest(item),
+            },
+          ]}
+        />
       </div>
       <div className="survey-card-copy">
         <h2>{item.title}</h2>
@@ -1474,15 +1668,6 @@ function SurveyCard({
       <div className="card-actions">
         <Button variant="primary" onClick={() => onOpen(item.id, "tally")}>
           Start tallying <Icon name="arrow" />
-        </Button>
-        <Button aria-label="Edit survey" onClick={() => onOpen(item.id, "builder")}>
-          <Icon name="builder" />
-        </Button>
-        <Button aria-label="Duplicate survey" onClick={() => onDuplicate(item)}>
-          <Icon name="copy" />
-        </Button>
-        <Button variant="ghost" aria-label="Delete survey" onClick={() => onDelete(item.id)}>
-          <Icon name="trash" />
         </Button>
       </div>
     </article>
@@ -1721,6 +1906,7 @@ function SurveyLibrary({
   onImport: (survey: Survey) => void
 }) {
   const [search, setSearch] = useState("")
+  const confirm = useConfirm()
   const [editingId, setEditingId] = useState("")
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [name, setName] = useState("")
@@ -1850,7 +2036,22 @@ function SurveyLibrary({
                     item={item}
                     onOpen={onOpen}
                     onDuplicate={onDuplicate}
-                    onDelete={onDelete}
+                    onDeleteRequest={(target) =>
+                      confirm.ask({
+                        title: `Delete “${target.title || "Untitled"}”?`,
+                        body: (
+                          <>
+                            The survey and its {target.responses.length}{" "}
+                            {target.responses.length === 1
+                              ? "response"
+                              : "responses"}{" "}
+                            will be deleted. This cannot be undone.
+                          </>
+                        ),
+                        confirmLabel: "Delete survey",
+                        onConfirm: () => onDelete(target.id),
+                      })
+                    }
                   />
                 ))}
               </section>
@@ -1868,6 +2069,7 @@ function SurveyLibrary({
           <small>Start from a blank format</small>
         </button>
       </section>
+      {confirm.dialog}
     </div>
   )
 }
@@ -3135,6 +3337,7 @@ function TallyWorkspace({
     })
   }
   const [editing, setEditing] = useState<ResponseRecord | null>(null)
+  const confirm = useConfirm()
   const requestSave = () => {
     if (questions.length === 0) {
       setValidationMessage("This survey has no answerable questions.")
@@ -3371,7 +3574,22 @@ function TallyWorkspace({
       {mode === "grid" && (
         <ResponseGrid
           survey={survey}
-          onDelete={deleteRecord}
+          onDelete={(record) =>
+            confirm.ask({
+              title: "Delete this response?",
+              body: (
+                <>
+                  {record.identifier
+                    ? `Response ${record.identifier}`
+                    : "This response"}{" "}
+                  and every answer in it will be removed from this survey. This
+                  cannot be undone.
+                </>
+              ),
+              confirmLabel: "Delete response",
+              onConfirm: () => deleteRecord(record),
+            })
+          }
           onEdit={setEditing}
         />
       )}
@@ -3463,6 +3681,7 @@ function TallyWorkspace({
           </section>
         </div>
       )}
+      {confirm.dialog}
     </div>
   )
 }
@@ -4263,6 +4482,7 @@ const FEEDBACK_STATUSES: Array<{ value: FeedbackStatus; label: string }> = [
 /** Admin-only inbox. Row Level Security keeps this list out of everyone else. */
 function FeedbackView({ onNotice }: { onNotice: (message: string) => void }) {
   const [items, setItems] = useState<FeedbackItem[] | null>(null)
+  const confirm = useConfirm()
   const [error, setError] = useState("")
   const [busyId, setBusyId] = useState("")
   const [filter, setFilter] = useState<FeedbackStatus | "all">("all")
@@ -4389,9 +4609,21 @@ function FeedbackView({ onNotice }: { onNotice: (message: string) => void }) {
                     aria-label="Delete feedback"
                     disabled={busyId === item.id}
                     onClick={() =>
-                      run(item.id, "Deleted that note", () =>
-                        deleteFeedback(item.id),
-                      )
+                      confirm.ask({
+                        title: "Delete this note?",
+                        body: (
+                          <>
+                            The note from{" "}
+                            <strong>{item.username || "an unknown user"}</strong>{" "}
+                            will be removed from the inbox. This cannot be undone.
+                          </>
+                        ),
+                        confirmLabel: "Delete note",
+                        onConfirm: () =>
+                          run(item.id, "Deleted that note", () =>
+                            deleteFeedback(item.id),
+                          ),
+                      })
                     }
                   >
                     <Icon name="trash" />
@@ -4403,6 +4635,7 @@ function FeedbackView({ onNotice }: { onNotice: (message: string) => void }) {
           ))}
         </div>
       )}
+      {confirm.dialog}
     </div>
   )
 }
@@ -4547,6 +4780,7 @@ function ResultsView({
 }) {
   const [tab, setTab] = useState<"summary" | "responses">("summary")
   const [editing, setEditing] = useState<ResponseRecord | null>(null)
+  const confirm = useConfirm()
   const [order, setOrder] = useState<string[]>([])
   const [surveyOrder, setSurveyOrder] = useState<string[]>([])
   const [folderOrder, setFolderOrder] = useState<string[]>([])
@@ -4629,10 +4863,7 @@ function ResultsView({
     saveResultOrder(survey.id, ids)
   }
 
-  const resetOrder = () => {
-    setOrder([])
-    saveResultOrder(survey.id, [])
-  }
+  
 
   const orderedSurveys = useMemo(() => {
     if (surveyOrder.length === 0) return surveys
@@ -4671,10 +4902,7 @@ function ResultsView({
     saveSurveyOrder(ids)
   }
 
-  const resetSurveyOrder = () => {
-    setSurveyOrder([])
-    saveSurveyOrder([])
-  }
+  
 
   const surveyDrag = (id: string): HTMLAttributes<HTMLElement> => ({
     draggable: true,
@@ -4698,7 +4926,8 @@ function ResultsView({
     onDrop: (event: DragEvent<HTMLElement>) => {
       event.preventDefault()
       stopEdgeScroll()
-      reorderSurveys(event.dataTransfer.getData("text/plain"), id)
+      const payload = event.dataTransfer.getData("text/plain")
+      reorderSurveys(stripPayload(payload, "survey:"), id)
       setDraggingSurveyId("")
       setDropSurveyId("")
     },
@@ -4731,9 +4960,9 @@ function ResultsView({
       stopEdgeScroll()
       const payload = event.dataTransfer.getData("text/plain")
       if (payload.startsWith("survey:")) {
-        onMoveSurvey(payload.slice("survey:".length), id || null)
+        onMoveSurvey(stripPayload(payload, "survey:"), id || null)
       } else if (payload.startsWith("folder:")) {
-        reorderFolders(payload.slice("folder:".length), id)
+        reorderFolders(stripPayload(payload, "folder:"), id)
       }
       setDropFolderId("")
       setDropSurveyId("")
@@ -4891,31 +5120,16 @@ function ResultsView({
           </div>
           {panel.collapsed ? null : (
             <>
-              <div
-                className={`add-menu ${surveyOrder.length ? "two-up" : ""}`}
-              >
+              <div className="add-menu">
                 {foldersAvailable && <FolderCreate onCreate={onCreateFolder} />}
-                <div className="add-menu-row">
-                  <button
-                    className="add-question"
-                    type="button"
-                    onClick={onBackToSurveys}
-                  >
-                    <Icon name="back" size={15} />
-                    All surveys
-                  </button>
-                  {surveyOrder.length > 0 && (
-                    <button
-                      className="add-question"
-                      type="button"
-                      title="Back to the most recently updated order"
-                      onClick={resetSurveyOrder}
-                    >
-                      <Icon name="undo" size={15} />
-                      Reset order
-                    </button>
-                  )}
-                </div>
+                <button
+                  className="add-question"
+                  type="button"
+                  onClick={onBackToSurveys}
+                >
+                  <Icon name="back" size={15} />
+                  All surveys
+                </button>
               </div>
               <div
                 className="question-list"
@@ -5073,18 +5287,24 @@ function ResultsView({
             Individual responses
           </button>
         </div>
-        {order.length > 0 && (
-          <Button onClick={resetOrder}>
-            <Icon name="undo" />
-            Reset order
-          </Button>
-        )}
+        
         {survey.responses.length > 0 && (
           <Button
             variant="danger"
             onClick={() =>
-              window.confirm("Clear all saved responses?") &&
-              onChange({ ...survey, responses: [] })
+              confirm.ask({
+                title: "Clear every response?",
+                body: (
+                  <>
+                    All {survey.responses.length} saved{" "}
+                    {survey.responses.length === 1 ? "response" : "responses"} in{" "}
+                    <strong>{survey.title || "Untitled"}</strong> will be deleted.
+                    The survey itself is kept. This cannot be undone.
+                  </>
+                ),
+                confirmLabel: "Clear responses",
+                onConfirm: () => onChange({ ...survey, responses: [] }),
+              })
             }
           >
             Clear responses
@@ -5096,9 +5316,25 @@ function ResultsView({
           survey={survey}
           onEdit={setEditing}
           onDelete={(record) =>
-            onChange({
-              ...survey,
-              responses: survey.responses.filter((r) => r.id !== record.id),
+            confirm.ask({
+              title: "Delete this response?",
+              body: (
+                <>
+                  {record.identifier
+                    ? `Response ${record.identifier}`
+                    : "This response"}{" "}
+                  and every answer in it will be removed from this survey. This
+                  cannot be undone.
+                </>
+              ),
+              confirmLabel: "Delete response",
+              onConfirm: () =>
+                onChange({
+                  ...survey,
+                  responses: survey.responses.filter(
+                    (r) => r.id !== record.id,
+                  ),
+                }),
             })
           }
         />
@@ -5142,6 +5378,7 @@ function ResultsView({
           }}
         />
       ) : null}
+      {confirm.dialog}
     </div>
   )
 }

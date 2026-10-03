@@ -243,6 +243,19 @@ h2 { letter-spacing: -.025em; }
 .card-stats strong { color: var(--ink); font-size: 15px; margin-right: 3px; }
 .card-actions { display: flex; align-items: center; gap: 6px; }
 .card-actions .btn-primary { margin-right: auto; }
+/* The dots. The popover is a positioned child of the card, so the card needs a
+   lifted stacking context of its own to keep it above the neighbouring cards. */
+.survey-card:has(.card-menu.open) { z-index: 6; }
+.card-menu { position: relative; flex: 0 0 auto; }
+.card-menu-trigger { display: grid; place-items: center; color: var(--muted); }
+.card-menu-trigger:hover { color: var(--ink); box-shadow: none; }
+.card-menu-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; min-width: 178px; display: grid; gap: 2px; padding: 5px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 11px; box-shadow: var(--shadow); }
+.card-menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ink); font-size: 13px; font-weight: 600; text-align: left; white-space: nowrap; cursor: pointer; transition: background-color .16s ease, color .16s ease; }
+.card-menu-item:hover { background: var(--surface-quiet); color: var(--primary); }
+.card-menu-item .icon { color: var(--muted); }
+.card-menu-item:hover .icon { color: var(--primary); }
+.card-menu-item.danger, .card-menu-item.danger .icon { color: var(--danger); }
+.card-menu-item.danger:hover { background: var(--danger-fill); color: var(--danger); }
 .new-card { min-height: 270px; border: 1px dashed var(--line-strong); background: var(--surface-translucent); border-radius: var(--radius); display: grid; place-content: center; justify-items: center; gap: 8px; cursor: pointer; color: var(--muted); }
 .new-card:hover { background: var(--surface); border-color: var(--primary); color: var(--primary); }
 .new-card > span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); margin-bottom: 4px; }
@@ -337,9 +350,6 @@ h2 { letter-spacing: -.025em; }
 .question-number.empty { background: transparent; }
 .question-list-item.active .question-number { background: var(--primary-soft); color: var(--primary); }
 .add-menu { flex: 0 0 auto; border-bottom: 1px solid var(--add-menu-line); margin-bottom: 14px; padding-bottom: 14px; }
-.add-menu.two-up { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.add-menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.add-menu-row:only-child { grid-template-columns: 1fr; }
 .folder-create { display: flex; gap: 6px; margin-bottom: 8px; }
 .folder-create .input { flex: 1 1 auto; min-width: 0; min-height: 38px; }
 .folder-create .btn { padding: 8px 10px; }
@@ -425,6 +435,13 @@ kbd { font: inherit; font-size: 11px; font-weight: 800; min-width: 26px; height:
 .modal-close { flex: 0 0 auto; align-self: flex-start; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; transition: color .18s ease, border-color .18s ease; }
 .modal-close:hover { color: var(--ink); border-color: var(--line-strong); }
 .save-prompt { width: min(430px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 24px 26px; }
+/* Confirmation for every destructive action, replacing window.confirm. */
+.confirm-dialog { width: min(440px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 26px; display: grid; justify-items: start; gap: 14px; }
+.confirm-badge { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger-line); }
+.confirm-dialog h2 { font-size: 20px; }
+.confirm-body { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.confirm-body strong { color: var(--ink); }
+.confirm-dialog > footer { display: flex; justify-content: flex-end; gap: 10px; width: 100%; margin-top: 2px; }
 .save-prompt header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .save-prompt h2 { font-size: 21px; }
 .save-prompt-body { margin: 12px 0 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
@@ -604,6 +621,8 @@ td.row-actions { white-space: nowrap; }
 .login-modes button { border: 0; border-radius: 8px; padding: 8px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; cursor: pointer; }
 .login-modes button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
 .login-done { background: var(--mint-soft); border: 1px solid var(--mint-line); border-radius: 9px; padding: 10px 12px; color: var(--mint-ink); font-size: 12px; }
+.login-hint { margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.login-hint code { padding: 1px 5px; border-radius: 5px; background: var(--surface-sunken); color: var(--ink); font-family: inherit; font-weight: 700; }
 .results-metrics { background: var(--panel-muted); color: var(--on-panel); }
 .results-metrics .metric { border-color: var(--on-panel-line); }
 .results-metrics .metric span { color: var(--on-panel-3); }

@@ -66,6 +66,10 @@ create index if not exists feedback_created_at_idx on public.feedback (created_a
 -- Without this the app would have to create the row from the browser, which any
 -- visitor could do with their own id — including choosing role = 'admin'.
 -- The role is hard-coded to 'user' here, so nobody can self-promote.
+--
+-- The stored username is the one the person typed, carried in user metadata,
+-- not the slugged email local part. "John Smith" is listed as John Smith and
+-- still signs in as john-smith.
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -73,11 +77,13 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  typed text := nullif(btrim(new.raw_user_meta_data ->> 'username'), '');
 begin
   insert into public.profiles (id, username, role, verified)
   values (
     new.id,
-    coalesce(nullif(split_part(new.email, '@', 1), ''), 'user'),
+    coalesce(typed, nullif(split_part(new.email, '@', 1), ''), 'user'),
     'user',
     false
   )
@@ -187,6 +193,12 @@ $$;
 
 -- Renaming keeps the login working: the username is the email local part, so
 -- both the profile and the auth identity move together.
+--
+-- The slug below MUST stay identical to usernameToSlug() in src/auth.ts, and the
+-- fallback to the one in the same file. If the two ever disagree, renaming an
+-- account here would rewrite its email to an address the app no longer signs in
+-- with, locking that account out of its own surveys. Plain lowercase-and-replace
+-- with no Unicode normalisation, for exactly that reason.
 create or replace function public.admin_rename(target uuid, new_username text)
 returns void
 language plpgsql
@@ -194,24 +206,34 @@ security definer
 set search_path = public, auth
 as $$
 declare
-  clean text := lower(btrim(new_username));
+  label  text := btrim(new_username);
+  slug   text := trim(both '-' from regexp_replace(lower(btrim(new_username)), '[^a-z0-9]+', '-', 'g'));
+  -- Same fallback the app uses for a name with no ASCII in it: the UTF-8 bytes
+  -- hex encoded, which encode()/hex matches exactly. Truncated at 60 there and
+  -- here, so the two cannot drift apart.
+  fallback text := 'u' || left(encode(convert_to(lower(btrim(new_username)), 'UTF8'), 'hex'), 60);
 begin
   if not public.is_admin() then
     raise exception 'Only an administrator can rename accounts';
   end if;
-  if clean = '' or clean !~ '^[a-z0-9._-]{3,32}$' then
-    raise exception 'Usernames must be 3-32 characters, using letters, numbers, dot, dash or underscore';
+  if coalesce(slug, fallback, '') = '' then
+    raise exception 'That name is too long - keep it shorter';
   end if;
-  if exists (select 1 from public.profiles where username = clean and id <> target) then
+  if length(coalesce(nullif(slug, ''), fallback)) > 64 then
+    raise exception 'That name is too long - keep it shorter';
+  end if;
+  if exists (select 1 from public.profiles where username = label and id <> target) then
     raise exception 'That username is taken';
   end if;
 
-  update public.profiles set username = clean where id = target;
+  update public.profiles set username = label where id = target;
   if not found then
     raise exception 'No such account';
   end if;
 
-  update auth.users set email = clean || '@tallyform.local' where id = target;
+  update auth.users
+  set email = coalesce(nullif(slug, ''), fallback) || '@tallyform.local'
+  where id = target;
 end;
 $$;
 

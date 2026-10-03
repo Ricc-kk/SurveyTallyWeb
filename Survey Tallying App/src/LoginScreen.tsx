@@ -1,10 +1,25 @@
 import { useState, type FormEvent } from "react"
-import { register, signIn } from "./auth"
+import {
+  register,
+  signIn,
+  usernameProblem,
+  usernameToEmail,
+  usernameToSlug,
+} from "./auth"
 import { THEME_OPTIONS, loadTheme, saveTheme, type Theme } from "./theme"
 
 type Mode = "signin" | "register"
 
-export default function LoginScreen() {
+/**
+ * Registration is only offered once the approval system exists.
+ *
+ * Until supabase/accounts-migration.sql has been run there is no profiles
+ * table, so the app cannot tell an administrator from anyone else and treats
+ * every signed-in account as one. Leaving the Create account tab open in that
+ * state would hand full access to whoever signed up, so it stays hidden until
+ * the tables are there.
+ */
+export default function LoginScreen({ canRegister = true }: { canRegister?: boolean }) {
   const [mode, setMode] = useState<Mode>("signin")
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
@@ -14,6 +29,10 @@ export default function LoginScreen() {
   const [theme, setTheme] = useState<Theme>(loadTheme)
 
   const submitting = busy && !done
+  // Any username is accepted; this only reports the rare name that cannot
+  // become a login, so the form can say why before a request is sent.
+  const nameProblem = mode === "register" ? usernameProblem(username) : null
+  const slug = username.trim() ? usernameToEmail(username) : ""
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -73,24 +92,26 @@ export default function LoginScreen() {
           <span>Tallyform</span>
         </div>
 
-        <div className="login-modes" role="group" aria-label="Account">
-          <button
-            type="button"
-            className={mode === "signin" ? "active" : ""}
-            aria-pressed={mode === "signin"}
-            onClick={() => switchMode("signin")}
-          >
-            Sign in
-          </button>
-          <button
-            type="button"
-            className={mode === "register" ? "active" : ""}
-            aria-pressed={mode === "register"}
-            onClick={() => switchMode("register")}
-          >
-            Create account
-          </button>
-        </div>
+        {canRegister && (
+          <div className="login-modes" role="group" aria-label="Account">
+            <button
+              type="button"
+              className={mode === "signin" ? "active" : ""}
+              aria-pressed={mode === "signin"}
+              onClick={() => switchMode("signin")}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              className={mode === "register" ? "active" : ""}
+              aria-pressed={mode === "register"}
+              onClick={() => switchMode("register")}
+            >
+              Create account
+            </button>
+          </div>
+        )}
 
         <form onSubmit={submit}>
           <label className="field">
@@ -102,9 +123,16 @@ export default function LoginScreen() {
               autoComplete="username"
               autoCapitalize="none"
               spellCheck={false}
-              minLength={3}
               required
             />
+            {mode === "register" && slug && slug !== `${username.trim()}@tallyform.local` && (
+              <small className="login-hint">
+                Signs in as <code>{slug}</code>.{" "}
+                {usernameToSlug(username)
+                  ? "Spaces and symbols are fine — they become dashes."
+                  : "Your login has to be stored in a coded form, but you still sign in with this name."}
+              </small>
+            )}
           </label>
 
           <label className="field">
@@ -122,6 +150,12 @@ export default function LoginScreen() {
             />
           </label>
 
+          {nameProblem && (
+            <p className="login-error" role="alert">
+              {nameProblem}
+            </p>
+          )}
+
           {error && (
             <p className="login-error" role="alert">
               {error}
@@ -134,7 +168,11 @@ export default function LoginScreen() {
             </p>
           )}
 
-          <button className="btn btn-primary" type="submit" disabled={busy}>
+          <button
+            className="btn btn-primary"
+            type="submit"
+            disabled={busy || Boolean(nameProblem)}
+          >
             {submitting
               ? mode === "register"
                 ? "Creating account…"
@@ -147,7 +185,7 @@ export default function LoginScreen() {
 
         <p className="login-foot">
           {mode === "register"
-            ? "Choose any username and a password. An administrator verifies new accounts before they can sign in."
+            ? "Just a username and a password — no email address. An administrator verifies new accounts before they can sign in."
             : "Your username and password, then straight into your surveys."}
         </p>
 

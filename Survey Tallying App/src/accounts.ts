@@ -102,6 +102,20 @@ function toFeedback(row: FeedbackRow): FeedbackItem {
   }
 }
 
+/**
+ * Whether the accounts tables exist, checked before anyone signs in.
+ *
+ * Row Level Security hides every row from a signed-out visitor, so a working
+ * table answers with an empty list rather than an error. That is what separates
+ * "installed" from "not installed yet" without needing any privilege.
+ */
+export async function probeAccountsSchema(): Promise<boolean> {
+  if (!supabase) return false
+
+  const { error } = await supabase.from("profiles").select("id").limit(1)
+  return !error
+}
+
 // ---------------------------------------------------------------------------
 // My own account
 // ---------------------------------------------------------------------------
