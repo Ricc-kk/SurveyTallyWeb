@@ -1,0 +1,11 @@
+{
+  "title": "Tallyform",
+  "description": "Build flexible survey questionnaires and tally paper, interview, or field responses fast with keyboard-first data entry. Live totals, CSV and JSON export, stored locally in your browser.",
+  "language": "en",
+  "robots": {
+    "index": true
+  },
+  "accessibility": {
+    "addBypassLinks": true
+  }
+}

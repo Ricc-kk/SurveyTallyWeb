@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd 'Survey Tallying App' && npx --yes pnpm@10 install --frozen-lockfile",
+  "buildCommand": "cd 'Survey Tallying App' && npx --yes pnpm@10 run build",
+  "outputDirectory": "Survey Tallying App/dist"
+}
