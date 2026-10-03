@@ -1,29 +1,54 @@
 import { useState, type FormEvent } from "react"
-import { signIn } from "./auth"
+import { register, signIn } from "./auth"
 import { THEME_OPTIONS, loadTheme, saveTheme, type Theme } from "./theme"
 
+type Mode = "signin" | "register"
+
 export default function LoginScreen() {
+  const [mode, setMode] = useState<Mode>("signin")
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
+  const [done, setDone] = useState("")
   const [busy, setBusy] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
+
+  const submitting = busy && !done
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (busy) return
 
     setError("")
+    setDone("")
     setBusy(true)
 
     try {
-      await signIn(username, password)
+      if (mode === "register") {
+        const alreadyIn = await register(username, password)
+        // A session means the app can move straight on to the waiting screen. If
+        // Supabase still wants an email confirmation, sign in here instead so the
+        // user lands in the same place either way.
+        if (!alreadyIn) await signIn(username, password)
+        setDone(
+          `Account "${username.trim()}" created. An administrator has to verify it before you can use Tallyform.`,
+        )
+      } else {
+        await signIn(username, password)
+      }
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not sign in.",
       )
       setBusy(false)
     }
+  }
+
+  const switchMode = (next: Mode) => {
+    setMode(next)
+    setError("")
+    setDone("")
+    setBusy(false)
   }
 
   return (
@@ -48,6 +73,25 @@ export default function LoginScreen() {
           <span>Tallyform</span>
         </div>
 
+        <div className="login-modes" role="group" aria-label="Account">
+          <button
+            type="button"
+            className={mode === "signin" ? "active" : ""}
+            aria-pressed={mode === "signin"}
+            onClick={() => switchMode("signin")}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            className={mode === "register" ? "active" : ""}
+            aria-pressed={mode === "register"}
+            onClick={() => switchMode("register")}
+          >
+            Create account
+          </button>
+        </div>
+
         <form onSubmit={submit}>
           <label className="field">
             <span className="field-label">Username</span>
@@ -58,6 +102,7 @@ export default function LoginScreen() {
               autoComplete="username"
               autoCapitalize="none"
               spellCheck={false}
+              minLength={3}
               required
             />
           </label>
@@ -69,7 +114,10 @@ export default function LoginScreen() {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete={
+                mode === "register" ? "new-password" : "current-password"
+              }
+              minLength={6}
               required
             />
           </label>
@@ -80,13 +128,27 @@ export default function LoginScreen() {
             </p>
           )}
 
+          {done && (
+            <p className="login-done" role="status">
+              {done}
+            </p>
+          )}
+
           <button className="btn btn-primary" type="submit" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
+            {submitting
+              ? mode === "register"
+                ? "Creating account…"
+                : "Signing in…"
+              : mode === "register"
+                ? "Create account"
+                : "Sign in"}
           </button>
         </form>
 
         <p className="login-foot">
-          Administrator access only. There is no public sign-up.
+          {mode === "register"
+            ? "Choose any username and a password. An administrator verifies new accounts before they can sign in."
+            : "Your username and password, then straight into your surveys."}
         </p>
 
         <div className="login-theme" role="group" aria-label="Colour theme">

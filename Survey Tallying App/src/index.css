@@ -494,6 +494,77 @@ tbody tr:hover { background: var(--surface-raised); }
    goes full width to give the panel somewhere to sit against the viewport edge. */
 .results-page { max-width: none; padding: 32px 38px; }
 .results-body { min-width: 0; }
+td.row-actions { white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+   Accounts, feedback and response editing
+   --------------------------------------------------------------------------- */
+
+.pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-quiet); color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .02em; }
+.pill-admin { background: var(--primary-soft); border-color: var(--primary-line); color: var(--primary); }
+.pill-ok { background: var(--mint-soft); border-color: var(--mint-line); color: var(--mint-ink); }
+.pill-warn { background: var(--surface-sunken); border-color: var(--line-strong); color: var(--draft-ink); }
+.pill-bad { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger); }
+
+/* Sits on the dark sidebar, so it uses the on-panel tokens like .nav-item. */
+.feedback-button { display: flex; align-items: center; gap: 9px; width: 100%; margin-top: 12px; padding: 9px 12px; border: 1px dashed var(--on-panel-line); border-radius: 10px; background: transparent; color: var(--on-panel-2); font-size: 12px; font-weight: 700; cursor: pointer; transition: color .18s ease, border-color .18s ease; }
+.feedback-button:hover { color: var(--on-panel); border-color: var(--on-panel-accent); }
+.feedback-button .icon { color: var(--on-panel-accent); flex: 0 0 auto; }
+
+.account-list { display: grid; gap: 12px; }
+.account-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.account-card.pending { border-color: var(--primary-line); background: var(--primary-soft); }
+.account-main { display: flex; align-items: center; gap: 14px; }
+.account-avatar { flex: 0 0 auto; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: var(--panel); color: var(--on-panel); font-weight: 800; }
+.account-id { flex: 1 1 auto; min-width: 0; }
+.account-id strong { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 15px; }
+.account-id small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.account-you { padding: 1px 7px; border-radius: 999px; background: var(--surface-quiet); border: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 700; }
+.account-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.account-actions { flex: 0 0 auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.account-detail { display: grid; gap: 12px; max-width: 520px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.account-danger { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.account-danger-note { margin: 4px 0 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.account-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.account-confirm .input { flex: 1 1 180px; min-width: 0; }
+
+.feedback-list { display: grid; gap: 12px; }
+.feedback-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.feedback-card > header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.feedback-card > header strong { color: var(--ink); font-size: 14px; }
+.feedback-card > header small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.feedback-actions { display: flex; align-items: center; gap: 10px; }
+.feedback-body { margin: 12px 0 0; color: var(--ink); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+
+.feedback-dialog { width: min(560px, 100%); display: grid; gap: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 24px 26px; }
+.feedback-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.feedback-dialog h2 { font-size: 21px; }
+.feedback-hint { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.feedback-dialog > footer { display: flex; justify-content: flex-end; gap: 10px; }
+
+.response-editor { width: min(680px, 100%); max-height: min(860px, calc(100vh - 48px)); display: flex; flex-direction: column; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); }
+.response-editor > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 26px 18px; border-bottom: 1px solid var(--line); }
+.response-editor h2 { font-size: 21px; }
+.response-editor-scroll { display: grid; gap: 15px; overflow-y: auto; padding: 18px 26px; }
+.response-editor-scroll .draft-note { display: block; margin-bottom: 0; line-height: 1.55; }
+.response-editor > footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 26px; border-top: 1px solid var(--line); }
+.edit-question { min-width: 0; margin: 0; padding: 13px 15px 15px; border: 1px solid var(--line); border-radius: 12px; }
+.edit-question legend { display: flex; align-items: center; gap: 9px; padding: 0 6px; color: var(--ink); font-size: 13px; font-weight: 700; }
+.edit-question-prompt { min-width: 0; }
+
+/* The waiting room is deliberately not dismissible: there is nothing to get to
+   behind it, so Escape and a backdrop click are left unbound. */
+.waiting-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: var(--backdrop); backdrop-filter: blur(4px); }
+.waiting-card { width: min(470px, 100%); display: grid; justify-items: center; gap: 15px; text-align: center; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 32px 30px; }
+.waiting-badge { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 50%; background: var(--primary-soft); color: var(--primary); }
+.waiting-badge.bad { background: var(--danger-soft); color: var(--danger); }
+.waiting-card h1 { color: var(--ink); font-size: 22px; }
+.waiting-card p { color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+.login-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 16px; padding: 4px; background: var(--surface-sunken); border-radius: 11px; }
+.login-modes button { border: 0; border-radius: 8px; padding: 8px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; cursor: pointer; }
+.login-modes button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.login-done { background: var(--mint-soft); border: 1px solid var(--mint-line); border-radius: 9px; padding: 10px 12px; color: var(--mint-ink); font-size: 12px; }
 .results-metrics { background: var(--panel-muted); color: var(--on-panel); }
 .results-metrics .metric { border-color: var(--on-panel-line); }
 .results-metrics .metric span { color: var(--on-panel-3); }
@@ -540,6 +611,8 @@ tbody tr:hover { background: var(--surface-raised); }
   .sidebar { position: fixed; top: auto; bottom: 0; width: 100%; height: 68px; padding: 8px 12px; flex-direction: row; align-items: center; z-index: 40; }
   .sidebar-resizer { display: none; }
   .brand, .sidebar-foot, .theme-switch, .sync-note { display: none; }
+  /* The bottom bar has room for the icon but not the label. */
+  .feedback-button { width: 44px; flex: 0 0 auto; margin-top: 0; padding: 0; justify-content: center; font-size: 0; }
   .nav { width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
   .nav-item { height: 52px; justify-content: center; flex-direction: column; gap: 3px; padding: 3px; font-size: 10px; }
   .nav-item .icon { width: 18px; }

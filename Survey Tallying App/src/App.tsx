@@ -16,6 +16,24 @@ import {
   subscribeToSession,
 } from "./auth"
 import LoginScreen from "./LoginScreen"
+import {
+  AccountsUnavailableError,
+  deleteAccount,
+  deleteFeedback,
+  fetchMyAccount,
+  listAccounts,
+  listFeedback,
+  renameAccount,
+  resetAccountPassword,
+  sendFeedback,
+  setAccountDisabled,
+  setAccountRole,
+  setFeedbackStatus,
+  verifyAccount,
+  type Account,
+  type FeedbackItem,
+  type FeedbackStatus,
+} from "./accounts"
 import { THEME_OPTIONS, loadTheme, saveTheme, type Theme } from "./theme"
 import {
   describeStorageError,
@@ -31,7 +49,7 @@ import type {
   Survey,
 } from "./types"
 
-type View = "surveys" | "builder" | "tally" | "results"
+type View = "surveys" | "builder" | "tally" | "results" | "accounts" | "feedback"
 type TallyMode = "quick" | "tap" | "grid"
 
 const TYPE_LABELS: Record<QuestionType, string> = {
@@ -132,6 +150,31 @@ const Icon = ({ name, size = 18 }: { name: string; size?: number }) => {
         <circle cx="16" cy="12" r="1" />
         <circle cx="8" cy="17" r="1" />
         <circle cx="16" cy="17" r="1" />
+      </>
+    ),
+    users: (
+      <>
+        <path d="M15.5 20v-1.4a3.6 3.6 0 0 0-3.6-3.6H6.6A3.6 3.6 0 0 0 3 18.6V20" />
+        <circle cx="9.2" cy="7.6" r="3.4" />
+        <path d="M21 20v-1.4a3.6 3.6 0 0 0-2.7-3.5M15.6 4.6a3.4 3.4 0 0 1 0 6" />
+      </>
+    ),
+    shield: (
+      <>
+        <path d="M12 3l7.5 3v5.4c0 4.4-3 8.1-7.5 9.9-4.5-1.8-7.5-5.5-7.5-9.9V6z" />
+        <path d="m9 12 2.2 2.2L15.5 10" />
+      </>
+    ),
+    feedback: (
+      <>
+        <path d="M20.5 11.7a7.8 7.8 0 0 1-11.2 7L4 20l1.3-5.3a7.8 7.8 0 1 1 15.2-3z" />
+      </>
+    ),
+    edit: <path d="M4 20h4L19 9l-4-4L4 16zM14.5 5.5l4 4" />,
+    lock: (
+      <>
+        <rect x="5" y="10" width="14" height="10" rx="2" />
+        <path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10" />
       </>
     ),
   }
@@ -593,6 +636,13 @@ function App() {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
+  const [account, setAccount] = useState<Account | null>(null)
+  const [accountChecked, setAccountChecked] = useState(false)
+  // Set when supabase/accounts-migration.sql has not been run yet. The app then
+  // behaves as it did before accounts existed rather than locking everyone out
+  // behind a verification screen that no admin can clear.
+  const [accountsOff, setAccountsOff] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
   const [showToTop, setShowToTop] = useState(false)
   const [nav, setNav] = useState<NavPref>(loadNavPref)
@@ -612,7 +662,57 @@ function App() {
 
   // Derived rather than corrected with a render-phase setView, which forced React
   // into an extra render pass on every tab change.
-  const activeView: View = survey ? view : "surveys"
+  const adminView =
+    !accountsOff && (view === "accounts" || view === "feedback")
+  const activeView: View = survey || adminView ? view : "surveys"
+
+  // An account is only useful once an administrator has approved it. Everything
+  // below this point assumes `canAccess`, and the gate itself is rendered
+  // before the app shell.
+  const canAccess = accountsOff || Boolean(account?.verified && !account.disabled)
+  const isAdmin =
+    canAccess && (accountsOff || account?.role === "admin")
+
+  const checkAccount = useCallback(() => {
+    fetchMyAccount()
+      .then((found) => {
+        setAccount(found)
+        setAccountChecked(true)
+      })
+      .catch((error: unknown) => {
+        if (error instanceof AccountsUnavailableError) {
+          setAccountsOff(true)
+          setAccountChecked(true)
+          return
+        }
+        setNotice(describeStorageError(error))
+        // Mark it settled either way: a failed read must not strand the user on
+        // the "Checking your account…" screen for good.
+        setAccountChecked(true)
+      })
+  }, [])
+
+  // Runs on sign-in. A null profile means the sign-up trigger has not written the
+  // row yet, which is treated as "no access" rather than "everything".
+  useEffect(() => {
+    if (!authReady) return
+    if (!userId) {
+      setAccount(null)
+      setAccountChecked(true)
+      return
+    }
+    setAccountChecked(false)
+    checkAccount()
+  }, [authReady, userId, checkAccount])
+
+  // The waiting room polls, so approving an account in another tab lets the
+  // waiting user straight in without signing in again.
+  const needsApproval = Boolean(account && !canAccess)
+  useEffect(() => {
+    if (!userId || !needsApproval) return
+    const timer = window.setInterval(checkAccount, 15000)
+    return () => window.clearInterval(timer)
+  }, [userId, needsApproval, checkAccount])
 
   useEffect(() => {
     let cancelled = false
@@ -646,6 +746,12 @@ function App() {
       return
     }
 
+    // Nothing to load until an administrator has approved the account, so the
+    // unverified user never issues a query they are not allowed to see anyway.
+    // `canAccess` is a dependency because it flips to true the moment the
+    // account is approved, and that is when the load should start.
+    if (!canAccess) return
+
     let cancelled = false
     setLoading(true)
     loadSurveys()
@@ -666,7 +772,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [userId, authReady])
+  }, [userId, authReady, canAccess])
 
   useEffect(() => {
     if (loading || !userId) return
@@ -809,7 +915,37 @@ function App() {
     window.addEventListener("pointerup", onUp)
   }
 
+  if (userId && !accountChecked && !accountsOff) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <div className="login-brand">
+            <span className="brand-mark">
+              <Icon name="check" size={19} />
+            </span>
+            <span>Tallyform</span>
+          </div>
+          <p className="login-foot">Checking your account…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (userId && !canAccess) {
+    return (
+      <WaitingRoom
+        account={account}
+        onSignOut={() => {
+          void signOutOfSupabase().catch((error: unknown) => {
+            setNotice(describeStorageError(error))
+          })
+        }}
+      />
+    )
+  }
+
   return (
+    <>
     <div
       className={`app-shell nav-${nav.side}`}
       style={{ "--nav-w": `${nav.width}px` } as React.CSSProperties}
@@ -866,7 +1002,33 @@ function App() {
             label="Results"
             onClick={() => setView("results")}
           />
+          {isAdmin && !accountsOff && (
+            <>
+              <NavItem
+                active={activeView === "accounts"}
+                icon="users"
+                label="Accounts"
+                onClick={() => setView("accounts")}
+              />
+              <NavItem
+                active={activeView === "feedback"}
+                icon="feedback"
+                label="Feedback"
+                onClick={() => setView("feedback")}
+              />
+            </>
+          )}
         </nav>
+        {!accountsOff && (
+          <button
+            className="feedback-button"
+            type="button"
+            onClick={() => setFeedbackOpen(true)}
+          >
+          <Icon name="feedback" />
+            Send feedback
+          </button>
+        )}
         {loading && hasLoadedOnce && (
           <p className="sync-note" role="status">
             Refreshing…
@@ -888,8 +1050,10 @@ function App() {
         <div className="sidebar-foot">
           <div className="privacy-dot" />
           <div>
-            <strong>Signed in</strong>
-            <span>Private to your account</span>
+            <strong>{account?.username ?? "Signed in"}</strong>
+            <span>
+              {isAdmin ? "Administrator" : "Private to your account"}
+            </span>
           </div>
           <button
             className="btn btn-ghost"
@@ -980,6 +1144,14 @@ function App() {
             />
           )}
         </div>
+        <div className="view-pane" hidden={activeView !== "accounts"}>
+          {isAdmin && !accountsOff && userId && (
+            <AccountsView selfId={userId} onNotice={setNotice} />
+          )}
+        </div>
+        <div className="view-pane" hidden={activeView !== "feedback"}>
+          {isAdmin && !accountsOff && <FeedbackView onNotice={setNotice} />}
+        </div>
       </main>
       {notice && (
         <div className="toast" role="status">
@@ -1006,6 +1178,13 @@ function App() {
         </button>
       )}
     </div>
+    {feedbackOpen && (
+      <FeedbackDialog
+        onClose={() => setFeedbackOpen(false)}
+        onSent={setNotice}
+      />
+    )}
+    </>
   )
 }
 
@@ -2457,6 +2636,7 @@ function TallyWorkspace({
       responses: survey.responses.filter((r) => r.id !== record.id),
     })
   }
+  const [editing, setEditing] = useState<ResponseRecord | null>(null)
   const requestSave = () => {
     if (questions.length === 0) {
       setValidationMessage("This survey has no answerable questions.")
@@ -2691,7 +2871,34 @@ function TallyWorkspace({
         </div>
       )}
       {mode === "grid" && (
-        <ResponseGrid survey={survey} onDelete={deleteRecord} />
+        <ResponseGrid
+          survey={survey}
+          onDelete={deleteRecord}
+          onEdit={setEditing}
+        />
+      )}
+      {editing && (
+        <ResponseEditor
+          survey={survey}
+          record={editing}
+          onClose={() => setEditing(null)}
+          onSave={(answers, identifier) => {
+            onChange({
+              ...survey,
+              responses: survey.responses.map((record) =>
+                record.id === editing.id
+                  ? {
+                      ...record,
+                      answers,
+                      identifier,
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : record,
+              ),
+            })
+            setEditing(null)
+          }}
+        />
       )}
       {mode !== "grid" && (
         <aside className="live-totals">
@@ -2983,9 +3190,11 @@ function AnswerField({
 function ResponseGrid({
   survey,
   onDelete,
+  onEdit,
 }: {
   survey: Survey
   onDelete: (record: ResponseRecord) => void
+  onEdit: (record: ResponseRecord) => void
 }) {
   const questions = survey.questions.filter((q) => q.type !== "section")
   return (
@@ -3023,10 +3232,19 @@ function ResponseGrid({
                   {questions.map((q) => (
                     <td key={q.id}>{answerLabel(q, record.answers[q.id])}</td>
                   ))}
-                  <td>
+                  <td className="row-actions">
                     <Button
                       variant="ghost"
-                      aria-label="Delete response"
+                      aria-label={`Edit response ${record.identifier || record.id}`}
+                      title="Edit answers"
+                      onClick={() => onEdit(record)}
+                    >
+                      <Icon name="edit" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-label={`Delete response ${record.identifier || record.id}`}
+                      title="Delete response"
                       onClick={() => onDelete(record)}
                     >
                       <Icon name="trash" />
@@ -3038,6 +3256,766 @@ function ResponseGrid({
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Accounts, roles and feedback
+// ---------------------------------------------------------------------------
+
+function errorText(cause: unknown, fallback: string) {
+  return cause instanceof Error && cause.message ? cause.message : fallback
+}
+
+function formatWhen(iso: string) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ""
+  return date.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+/**
+ * The screen an account sits on until an administrator approves it, and the one
+ * it sits on if access is revoked later. It polls for the change, so approving an
+ * account in another tab lets the waiting user straight in.
+ */
+function WaitingRoom({
+  account,
+  onSignOut,
+}: {
+  account: Account | null
+  onSignOut: () => void
+}) {
+  const revoked = Boolean(account?.disabled)
+  return (
+    <div className="waiting-backdrop">
+      <section
+        className="waiting-card"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="waiting-title"
+      >
+        <span className={`waiting-badge ${revoked ? "bad" : ""}`}>
+          <Icon name={revoked ? "lock" : "shield"} size={24} />
+        </span>
+        <h1 id="waiting-title">
+          {revoked ? "Access revoked" : "Waiting for verification"}
+        </h1>
+        <p>
+          {revoked
+            ? `An administrator has revoked access to “${account?.username ?? ""}”. Your surveys and responses are untouched — ask an administrator to restore the account.`
+            : `“${account?.username ?? ""}” still has to be verified by an administrator before Tallyform will open. This page updates by itself as soon as you are approved.`}
+        </p>
+        <Button onClick={onSignOut}>
+          <Icon name="back" />
+          Sign out
+        </Button>
+      </section>
+    </div>
+  )
+}
+
+function FeedbackDialog({
+  onClose,
+  onSent,
+}: {
+  onClose: () => void
+  onSent: (message: string) => void
+}) {
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (busy || !message.trim()) return
+    setBusy(true)
+    setError("")
+    try {
+      await sendFeedback(message)
+      onSent("Thanks — your note is in the admin inbox.")
+      onClose()
+    } catch (cause) {
+      setError(errorText(cause, "Could not send that."))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="feedback-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="feedback-title"
+      >
+        <header>
+          <div>
+            <p className="eyebrow">Improvements</p>
+            <h2 id="feedback-title">Send feedback</h2>
+          </div>
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close"
+            title="Close"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+        <TextArea
+          aria-label="Your feedback"
+          rows={6}
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          placeholder="What would make Tallyform better for you?"
+        />
+        <p className="feedback-hint">
+          Goes straight to the administrator inbox. Nothing you type here changes
+          your surveys.
+        </p>
+        {error && (
+          <p className="login-error" role="alert">
+            {error}
+          </p>
+        )}
+        <footer>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={busy || !message.trim()}
+          >
+            <Icon name="feedback" />
+            {busy ? "Sending…" : "Send feedback"}
+          </Button>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+/**
+ * Admin-only account management: approve a new account, promote or demote it,
+ * revoke or restore access, rename it, reset its password, or remove it.
+ *
+ * Nothing here is enforced by hiding a button — each action calls a Postgres
+ * function that re-checks the caller's role server-side.
+ */
+function AccountsView({
+  selfId,
+  onNotice,
+}: {
+  selfId: string
+  onNotice: (message: string) => void
+}) {
+  const [accounts, setAccounts] = useState<Account[] | null>(null)
+  const [error, setError] = useState("")
+  const [busyId, setBusyId] = useState("")
+  const [editingId, setEditingId] = useState("")
+  const [rename, setRename] = useState("")
+  const [password, setPassword] = useState("")
+  const [confirmText, setConfirmText] = useState("")
+  const [confirmingId, setConfirmingId] = useState("")
+
+  const reload = useCallback(() => {
+    listAccounts()
+      .then(setAccounts)
+      .catch((cause: unknown) =>
+        setError(errorText(cause, "Could not load accounts.")),
+      )
+  }, [])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const run = async (id: string, label: string, action: () => Promise<unknown>) => {
+    setBusyId(id)
+    setError("")
+    try {
+      await action()
+      onNotice(`${label}.`)
+      reload()
+    } catch (cause) {
+      setError(errorText(cause, `${label} failed.`))
+    } finally {
+      setBusyId("")
+    }
+  }
+
+  const closeEditor = () => {
+    setEditingId("")
+    setRename("")
+    setPassword("")
+    setConfirmingId("")
+    setConfirmText("")
+  }
+
+  const pending = accounts?.filter((account) => !account.verified).length ?? 0
+
+  return (
+    <div className="page accounts-page">
+      <header className="compact-header">
+        <div>
+          <p className="eyebrow">Administrator</p>
+          <h1>Accounts</h1>
+        </div>
+        <div className="header-actions">
+          <Button onClick={reload}>
+            <Icon name="undo" />
+            Refresh
+          </Button>
+        </div>
+      </header>
+
+      <section className="metrics-strip">
+        <Metric value={accounts?.length ?? 0} label="Accounts" />
+        <Metric value={pending} label="Waiting for verification" />
+        <Metric
+          value={accounts?.filter((account) => account.role === "admin").length ?? 0}
+          label="Administrators"
+        />
+      </section>
+
+      {error && (
+        <p className="login-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {accounts === null ? (
+        <div className="empty-state">
+          <h3>Loading accounts…</h3>
+        </div>
+      ) : accounts.length === 0 ? (
+        <div className="empty-state">
+          <h3>No accounts yet</h3>
+          <p>New registrations will appear here for verification.</p>
+        </div>
+      ) : (
+        <div className="account-list">
+          {accounts.map((account) => {
+            const isSelf = account.id === selfId
+            const busy = busyId === account.id
+            const expanded = editingId === account.id
+            return (
+              <article
+                className={`account-card ${account.verified ? "" : "pending"}`}
+                key={account.id}
+              >
+                <div className="account-main">
+                  <span className="account-avatar" aria-hidden="true">
+                    {account.username.slice(0, 1).toUpperCase()}
+                  </span>
+                  <div className="account-id">
+                    <strong>
+                      {account.username}
+                      {isSelf && <span className="account-you">you</span>}
+                    </strong>
+                    <small>Joined {formatWhen(account.createdAt)}</small>
+                    <div className="account-badges">
+                      <span
+                        className={`pill ${account.role === "admin" ? "pill-admin" : ""}`}
+                      >
+                        {account.role === "admin" ? "Administrator" : "User"}
+                      </span>
+                      {account.verified ? (
+                        <span className="pill pill-ok">Verified</span>
+                      ) : (
+                        <span className="pill pill-warn">Waiting for verification</span>
+                      )}
+                      {account.disabled && (
+                        <span className="pill pill-bad">Access revoked</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="account-actions">
+                    <Button
+                      variant={account.verified ? "ghost" : "primary"}
+                      disabled={isSelf || busy}
+                      onClick={() =>
+                        run(
+                          account.id,
+                          account.verified
+                            ? `Un-verified ${account.username}`
+                            : `Verified ${account.username}`,
+                          () => verifyAccount(account.id, !account.verified),
+                        )
+                      }
+                    >
+                      <Icon name="shield" />
+                      {account.verified ? "Un-verify" : "Verify"}
+                    </Button>
+                    <Button
+                      variant={account.disabled ? "ghost" : "ghost"}
+                      disabled={isSelf || busy}
+                      onClick={() =>
+                        run(
+                          account.id,
+                          account.disabled
+                            ? `Restored ${account.username}`
+                            : `Revoked access for ${account.username}`,
+                          () => setAccountDisabled(account.id, !account.disabled),
+                        )
+                      }
+                    >
+                      <Icon name={account.disabled ? "undo" : "lock"} />
+                      {account.disabled ? "Restore" : "Revoke"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        if (expanded) closeEditor()
+                        else {
+                          setEditingId(account.id)
+                          setRename(account.username)
+                          setPassword("")
+                          setConfirmingId("")
+                          setConfirmText("")
+                        }
+                      }}
+                    >
+                      <Icon name="more" />
+                      More
+                    </Button>
+                  </div>
+                </div>
+
+                {expanded && (
+                  <div className="account-detail">
+                    <div className="field">
+                      <span className="field-label">Role</span>
+                      <div className="segmented">
+                        <button
+                          className={account.role === "user" ? "active" : ""}
+                          disabled={isSelf || busy}
+                          onClick={() =>
+                            run(account.id, `Made ${account.username} a user`, () =>
+                              setAccountRole(account.id, "user"),
+                            )
+                          }
+                        >
+                          User
+                        </button>
+                        <button
+                          className={account.role === "admin" ? "active" : ""}
+                          disabled={isSelf || busy}
+                          onClick={() =>
+                            run(
+                              account.id,
+                              `Made ${account.username} an administrator`,
+                              () => setAccountRole(account.id, "admin"),
+                            )
+                          }
+                        >
+                          Administrator
+                        </button>
+                      </div>
+                    </div>
+
+                    <label className="field">
+                      <span className="field-label">Username</span>
+                      <input
+                        className="input"
+                        value={rename}
+                        onChange={(event) => setRename(event.target.value)}
+                        autoCapitalize="none"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <Button
+                      disabled={busy || !rename.trim() || rename === account.username}
+                      onClick={() =>
+                        run(
+                          account.id,
+                          `Renamed to ${rename.trim()}`,
+                          async () => {
+                            await renameAccount(account.id, rename)
+                            closeEditor()
+                          },
+                        )
+                      }
+                    >
+                      <Icon name="edit" />
+                      Save username
+                    </Button>
+
+                    <label className="field">
+                      <span className="field-label">New password</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        autoComplete="off"
+                        placeholder="At least 6 characters"
+                      />
+                    </label>
+                    <Button
+                      disabled={busy || password.length < 6}
+                      onClick={() =>
+                        run(
+                          account.id,
+                          `Reset the password for ${account.username}`,
+                          async () => {
+                            await resetAccountPassword(account.id, password)
+                            setPassword("")
+                          },
+                        )
+                      }
+                    >
+                      <Icon name="lock" />
+                      Reset password
+                    </Button>
+
+                    <div className="account-danger">
+                      <p className="field-label">Delete account</p>
+                      <p className="account-danger-note">
+                        Revoking keeps every survey and response. Deleting removes
+                        the login and everything it owns, permanently.
+                      </p>
+                      {confirmingId === account.id ? (
+                        <div className="account-confirm">
+                          <input
+                            className="input"
+                            value={confirmText}
+                            onChange={(event) => setConfirmText(event.target.value)}
+                            placeholder={`Type ${account.username} to confirm`}
+                            autoCapitalize="none"
+                            spellCheck={false}
+                          />
+                          <Button
+                            variant="danger"
+                            disabled={
+                              busy || confirmText.trim() !== account.username
+                            }
+                            onClick={() =>
+                              run(
+                                account.id,
+                                `Deleted ${account.username}`,
+                                async () => {
+                                  await deleteAccount(account.id, true)
+                                  closeEditor()
+                                },
+                              )
+                            }
+                          >
+                            <Icon name="trash" />
+                            Delete everything
+                          </Button>
+                          <Button onClick={() => setConfirmingId("")}>
+                            Cancel
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="account-confirm">
+                          <Button
+                            variant="danger"
+                            disabled={isSelf || busy}
+                            onClick={() =>
+                              run(
+                                account.id,
+                                `Revoked access for ${account.username}`,
+                                () => deleteAccount(account.id, false),
+                              )
+                            }
+                          >
+                            <Icon name="lock" />
+                            Revoke only
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            disabled={isSelf || busy}
+                            onClick={() => {
+                              setConfirmingId(account.id)
+                              setConfirmText("")
+                            }}
+                          >
+                            <Icon name="trash" />
+                            Delete permanently…
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </article>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const FEEDBACK_STATUSES: Array<{ value: FeedbackStatus; label: string }> = [
+  { value: "new", label: "New" },
+  { value: "reviewed", label: "Reviewed" },
+  { value: "done", label: "Done" },
+]
+
+/** Admin-only inbox. Row Level Security keeps this list out of everyone else. */
+function FeedbackView({ onNotice }: { onNotice: (message: string) => void }) {
+  const [items, setItems] = useState<FeedbackItem[] | null>(null)
+  const [error, setError] = useState("")
+  const [busyId, setBusyId] = useState("")
+  const [filter, setFilter] = useState<FeedbackStatus | "all">("all")
+
+  const reload = useCallback(() => {
+    listFeedback()
+      .then(setItems)
+      .catch((cause: unknown) =>
+        setError(errorText(cause, "Could not load feedback.")),
+      )
+  }, [])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const run = async (id: string, label: string, action: () => Promise<unknown>) => {
+    setBusyId(id)
+    setError("")
+    try {
+      await action()
+      onNotice(`${label}.`)
+      reload()
+    } catch (cause) {
+      setError(errorText(cause, `${label} failed.`))
+    } finally {
+      setBusyId("")
+    }
+  }
+
+  const shown =
+    items?.filter((item) => filter === "all" || item.status === filter) ?? []
+  const unread = items?.filter((item) => item.status === "new").length ?? 0
+
+  return (
+    <div className="page feedback-page">
+      <header className="compact-header">
+        <div>
+          <p className="eyebrow">Administrator</p>
+          <h1>Feedback</h1>
+        </div>
+        <div className="header-actions">
+          <Button onClick={reload}>
+            <Icon name="undo" />
+            Refresh
+          </Button>
+        </div>
+      </header>
+
+      <section className="metrics-strip">
+        <Metric value={items?.length ?? 0} label="Notes received" />
+        <Metric value={unread} label="Not reviewed" />
+        <Metric
+          value={items?.filter((item) => item.status === "done").length ?? 0}
+          label="Acted on"
+        />
+      </section>
+
+      <div className="results-toolbar">
+        <div className="segmented">
+          <button
+            className={filter === "all" ? "active" : ""}
+            onClick={() => setFilter("all")}
+          >
+            All
+          </button>
+          {FEEDBACK_STATUSES.map((option) => (
+            <button
+              key={option.value}
+              className={filter === option.value ? "active" : ""}
+              onClick={() => setFilter(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && (
+        <p className="login-error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {items === null ? (
+        <div className="empty-state">
+          <h3>Loading feedback…</h3>
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="empty-state">
+          <h3>Nothing here yet</h3>
+          <p>Notes sent from the sidebar land in this inbox.</p>
+        </div>
+      ) : (
+        <div className="feedback-list">
+          {shown.map((item) => (
+            <article className="feedback-card" key={item.id}>
+              <header>
+                <div>
+                  <strong>{item.username || "Unknown"}</strong>
+                  <small>{formatWhen(item.createdAt)}</small>
+                </div>
+                <div className="feedback-actions">
+                  <div className="segmented">
+                    {FEEDBACK_STATUSES.map((option) => (
+                      <button
+                        key={option.value}
+                        className={item.status === option.value ? "active" : ""}
+                        disabled={busyId === item.id}
+                        onClick={() =>
+                          run(
+                            item.id,
+                            `Marked as ${option.label.toLowerCase()}`,
+                            () => setFeedbackStatus(item.id, option.value),
+                          )
+                        }
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    aria-label="Delete feedback"
+                    disabled={busyId === item.id}
+                    onClick={() =>
+                      run(item.id, "Deleted that note", () =>
+                        deleteFeedback(item.id),
+                      )
+                    }
+                  >
+                    <Icon name="trash" />
+                  </Button>
+                </div>
+              </header>
+              <p className="feedback-body">{item.message}</p>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Edits one saved response. This is the answer to "a question was added after
+ * we tallied": every question is listed, ones with no answer yet are called out,
+ * and saving writes the whole answer map back.
+ */
+function ResponseEditor({
+  survey,
+  record,
+  onSave,
+  onClose,
+}: {
+  survey: Survey
+  record: ResponseRecord
+  onSave: (answers: Record<string, Answer>, identifier: string) => void
+  onClose: () => void
+}) {
+  const [answers, setAnswers] = useState<Record<string, Answer>>({
+    ...record.answers,
+  })
+  const [identifier, setIdentifier] = useState(record.identifier)
+  const questions = survey.questions.filter((q) => q.type !== "section")
+  const blank = questions.filter((question) => !isAnswered(answers[question.id]))
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="response-editor"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="response-editor-title"
+      >
+        <header>
+          <div>
+            <p className="eyebrow">
+              Saved {formatWhen(record.createdAt)}
+            </p>
+            <h2 id="response-editor-title">Edit response</h2>
+          </div>
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close"
+            title="Close"
+            onClick={onClose}
+          >
+            <Icon name="close" size={17} />
+          </button>
+        </header>
+
+        <div className="response-editor-scroll">
+          {blank.length > 0 && (
+            <p className="draft-note">
+              {blank.length} question{blank.length === 1 ? "" : "s"} never
+              answered{blank.length === 1 ? "" : "s"} — these were probably added
+              after this response was tallied.
+            </p>
+          )}
+
+          <label className="field">
+            <span className="field-label">{survey.identifierLabel}</span>
+            <input
+              className="input"
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+            />
+          </label>
+
+          {questions.map((question, index) => (
+            <fieldset className="edit-question" key={question.id}>
+              <legend>
+                <span className="question-number">{index + 1}</span>
+                <span className="edit-question-prompt">{question.prompt}</span>
+                {!isAnswered(answers[question.id]) && (
+                  <span className="pill pill-warn">Not answered</span>
+                )}
+              </legend>
+              <AnswerField
+                question={question}
+                answer={answers[question.id]}
+                onChange={(answer) =>
+                  setAnswers((current) => ({
+                    ...current,
+                    [question.id]: answer,
+                  }))
+                }
+                index={index}
+              />
+            </fieldset>
+          ))}
+        </div>
+
+        <footer>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={() => onSave(answers, identifier)}>
+            <Icon name="check" />
+            Save changes
+          </Button>
+        </footer>
+      </section>
     </div>
   )
 }
@@ -3058,6 +4036,7 @@ function ResultsView({
   onTally: () => void
 }) {
   const [tab, setTab] = useState<"summary" | "responses">("summary")
+  const [editing, setEditing] = useState<ResponseRecord | null>(null)
   const panelListRef = useRef<HTMLDivElement>(null)
   const {
     pref: panel,
@@ -3288,6 +4267,7 @@ function ResultsView({
       {tab === "responses" ? (
         <ResponseGrid
           survey={survey}
+          onEdit={setEditing}
           onDelete={(record) =>
             onChange({
               ...survey,
@@ -3309,6 +4289,29 @@ function ResultsView({
       )}
         </div>
       </div>
+      {editing ? (
+        <ResponseEditor
+          survey={survey}
+          record={editing}
+          onClose={() => setEditing(null)}
+          onSave={(answers, identifier) => {
+            onChange({
+              ...survey,
+              responses: survey.responses.map((record) =>
+                record.id === editing.id
+                  ? {
+                      ...record,
+                      answers,
+                      identifier,
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : record,
+              ),
+            })
+            setEditing(null)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

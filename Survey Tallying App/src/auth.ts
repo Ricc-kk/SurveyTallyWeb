@@ -69,6 +69,38 @@ export async function signIn(username: string, password: string): Promise<void> 
   if (error) throw error
 }
 
+/**
+ * Creates the login. The database trigger in accounts-migration.sql writes the
+ * matching profile row as an unverified, non-admin user, so nobody can self-
+ * promote by registering.
+ *
+ * Returns true when the new account is already signed in, which is the normal
+ * case: Tallyform maps usernames onto @tallyform.local, so Supabase's "confirm
+ * your email" step has to be switched off for sign-up to be usable at all.
+ */
+export async function register(
+  username: string,
+  password: string,
+): Promise<boolean> {
+  if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
+
+  const { data, error } = await supabase.auth.signUp({
+    email: usernameToEmail(username),
+    password,
+  })
+
+  if (error) {
+    // A username that is already taken surfaces here as a duplicate-email error.
+    const message = error.message.toLowerCase()
+    if (message.includes("already") || message.includes("registered")) {
+      throw new Error("That username is already taken.")
+    }
+    throw error
+  }
+
+  return Boolean(data.session)
+}
+
 export async function signOut(): Promise<void> {
   if (!supabase) return
   const { error } = await supabase.auth.signOut()
