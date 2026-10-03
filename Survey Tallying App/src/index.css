@@ -293,8 +293,10 @@ h2 { letter-spacing: -.025em; }
 .app-shell.nav-right .builder-layout.outline-left:not(.outline-floating) .builder-outline { left: 0; }
 
 /* The docked panel owns the edge it is docked to, so the floating back-to-top
-   button moves to the opposite corner instead of sitting on top of it. */
-.app-shell:has(.builder-layout.outline-right:not(.outline-floating)) .to-top { right: auto; left: 24px; }
+   button moves to the opposite corner instead of sitting on top of it. Scoped
+   to the visible pane, since hidden views stay mounted and would otherwise
+   answer for whichever panel happens to be off screen. */
+.app-shell:has(.view-pane:not([hidden]) .builder-layout.outline-right:not(.outline-floating)) .to-top { right: auto; left: 24px; }
 .outline-resizer { position: absolute; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; }
 .outline-right .outline-resizer { left: -5px; }
 .outline-left .outline-resizer { right: -5px; }
@@ -417,6 +419,9 @@ kbd { font: inherit; font-size: 11px; font-weight: 800; min-width: 26px; height:
 .segmented { display: inline-flex; padding: 4px; border-radius: 10px; background: var(--surface-sunken); }
 .segmented button { border: 0; background: transparent; padding: 8px 14px; border-radius: 7px; font-size: 13px; font-weight: 650; color: var(--muted); cursor: pointer; }
 .segmented button.active { background: var(--surface); color: var(--ink); box-shadow: 0 2px 7px var(--shadow); }
+.draft-note { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; padding: 11px 16px; background: var(--surface); border: 1px solid var(--primary-line); border-radius: 12px; font-size: 12px; color: var(--ink); }
+.draft-note > span { display: flex; align-items: center; gap: 9px; }
+.draft-note .icon { color: var(--primary); flex: 0 0 auto; }
 .respondent-bar { background: var(--surface-sunken); border-radius: 12px; padding: 12px 16px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
 .respondent-bar .field { display: flex; align-items: center; gap: 10px; }
 .respondent-bar .input { width: 200px; background: var(--surface); min-height: 36px; }
@@ -485,6 +490,10 @@ th, td { padding: 13px 15px; border-bottom: 1px solid var(--line-soft); text-ali
 th { color: var(--muted); background: var(--surface-raised); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 tbody tr:hover { background: var(--surface-raised); }
 
+/* The results view carries the same docked panel as the builder, so the page
+   goes full width to give the panel somewhere to sit against the viewport edge. */
+.results-page { max-width: none; padding: 32px 38px; }
+.results-body { min-width: 0; }
 .results-metrics { background: var(--panel-muted); color: var(--on-panel); }
 .results-metrics .metric { border-color: var(--on-panel-line); }
 .results-metrics .metric span { color: var(--on-panel-3); }

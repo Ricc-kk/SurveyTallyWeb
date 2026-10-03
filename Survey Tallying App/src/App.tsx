@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -416,11 +417,130 @@ function questionNumbers(questions: Question[]): Array<number | null> {
   })
 }
 
-type OutlinePref = {
+type PanelPref = {
   side: "left" | "right"
   collapsed: boolean
   floating: boolean
   width: number
+}
+
+const OUTLINE_KEY = "tallyform.outline"
+const OUTLINE_MIN = 210
+const OUTLINE_MAX = 460
+const RESULTS_PANEL_KEY = "tallyform.resultsPanel"
+const RESULTS_PANEL_MIN = 210
+const RESULTS_PANEL_MAX = 420
+
+function loadPanelPref(
+  key: string,
+  min: number,
+  max: number,
+  width: number,
+): PanelPref {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PanelPref>
+      if (parsed.side === "left" || parsed.side === "right") {
+        return {
+          side: parsed.side,
+          collapsed: Boolean(parsed.collapsed),
+          floating: Boolean(parsed.floating),
+          width: Math.min(max, Math.max(min, Number(parsed.width) || width)),
+        }
+      }
+    }
+  } catch {
+    // Fall through to defaults if storage is unavailable.
+  }
+  return { side: "right", collapsed: false, floating: false, width }
+}
+
+/**
+ * A docked side panel: resizable by dragging its inner edge, mountable on either
+ * side by dragging the header, collapsible to a rail, and floating instead of
+ * docked if you prefer. Shared by the builder's question list and the results
+ * view's survey list so the two are impossible to tell apart.
+ */
+/** Width of the minimised rail. Applied inline because the inline
+    `--outline-w` would otherwise beat the `.outline-collapsed` rule. */
+const OUTLINE_RAIL_W = 64
+
+function outlineWidth(pref: PanelPref) {
+  return pref.collapsed ? `${OUTLINE_RAIL_W}px` : `${pref.width}px`
+}
+
+function useDockablePanel(
+  key: string,
+  min: number,
+  max: number,
+  width: number,
+  inner?: { current: HTMLElement | null },
+) {
+  const [pref, setPref] = useState<PanelPref>(() =>
+    loadPanelPref(key, min, max, width),
+  )
+  const edgeScroll = useEdgeAutoScroll(inner)
+
+  const update = (patch: Partial<PanelPref>) =>
+    setPref((current) => {
+      const next = { ...current, ...patch }
+      try {
+        window.localStorage.setItem(key, JSON.stringify(next))
+      } catch {
+        // Layout preference is best-effort.
+      }
+      return next
+    })
+
+  /** Drag the inner edge to resize; the panel grows away from the content. */
+  const startResize = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = pref.width
+    const side = pref.side
+    edgeScroll.track(event.clientY)
+    const onMove = (move: PointerEvent) => {
+      edgeScroll.track(move.clientY)
+      const delta = side === "right" ? startX - move.clientX : move.clientX - startX
+      update({
+        width: Math.min(max, Math.max(min, Math.round(startWidth + delta))),
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  /** Drag the header left or right to swap which side the panel sits on. */
+  const startMove = (event: React.PointerEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    edgeScroll.track(event.clientY)
+    const onMove = (move: PointerEvent) => edgeScroll.track(move.clientY)
+    const onUp = (up: PointerEvent) => {
+      const delta = up.clientX - startX
+      if (Math.abs(delta) > 60) update({ side: delta > 0 ? "right" : "left" })
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      edgeScroll.stop()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  return {
+    pref,
+    update,
+    startResize,
+    startMove,
+    trackEdgeScroll: edgeScroll.track,
+    stopEdgeScroll: edgeScroll.stop,
+  }
 }
 
 type NavPref = {
@@ -451,33 +571,6 @@ function loadNavPref(): NavPref {
     // Fall through to defaults if storage is unavailable.
   }
   return { side: "left", width: 232 }
-}
-
-const OUTLINE_KEY = "tallyform.outline"
-const OUTLINE_MIN = 210
-const OUTLINE_MAX = 460
-
-function loadOutlinePref(): OutlinePref {
-  try {
-    const raw = window.localStorage.getItem(OUTLINE_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<OutlinePref>
-      if (parsed.side === "left" || parsed.side === "right") {
-        return {
-          side: parsed.side,
-          collapsed: Boolean(parsed.collapsed),
-          floating: Boolean(parsed.floating),
-          width: Math.min(
-            OUTLINE_MAX,
-            Math.max(OUTLINE_MIN, Number(parsed.width) || 260),
-          ),
-        }
-      }
-    }
-  } catch {
-    // Fall through to defaults if storage is unavailable.
-  }
-  return { side: "right", collapsed: false, floating: false, width: 260 }
 }
 
 function csvCell(value: unknown) {
@@ -878,9 +971,11 @@ function App() {
         <div className="view-pane" hidden={activeView !== "results"}>
           {survey && (
             <ResultsView
-              key={survey.id}
               survey={survey}
+              surveys={surveys}
               onChange={(next) => updateSurvey(survey.id, () => next)}
+              onSelect={setSelectedId}
+              onBackToSurveys={() => setView("surveys")}
               onTally={() => setView("tally")}
             />
           )}
@@ -1120,70 +1215,26 @@ function SurveyBuilder({
 }) {
   const [selected, setSelected] = useState(survey.questions[0]?.id ?? "")
   const [savedNotice, setSavedNotice] = useState(false)
-  const [outline, setOutline] = useState<OutlinePref>(loadOutlinePref)
   const [addCount, setAddCount] = useState("1")
   const [insertPosition, setInsertPosition] = useState("end")
   const [pendingType, setPendingType] = useState<QuestionType>("single")
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([])
   const outlineListRef = useRef<HTMLDivElement>(null)
-  const edgeScroll = useEdgeAutoScroll(outlineListRef)
+  const {
+    pref: outline,
+    update: setOutlinePref,
+    startResize,
+    startMove,
+    trackEdgeScroll: trackOutlineScroll,
+    stopEdgeScroll: stopOutlineScroll,
+  } = useDockablePanel(
+    OUTLINE_KEY,
+    OUTLINE_MIN,
+    OUTLINE_MAX,
+    260,
+    outlineListRef,
+  )
   const update = (patch: Partial<Survey>) => onChange({ ...survey, ...patch })
-
-  const setOutlinePref = (patch: Partial<OutlinePref>) =>
-    setOutline((current) => {
-      const next = { ...current, ...patch }
-      try {
-        window.localStorage.setItem(OUTLINE_KEY, JSON.stringify(next))
-      } catch {
-        // Layout preference is best-effort.
-      }
-      return next
-    })
-
-  /** Drag the inner edge to resize; the panel grows toward the content. */
-  const startResize = (event: React.PointerEvent) => {
-    event.preventDefault()
-    const startX = event.clientX
-    const startWidth = outline.width
-    edgeScroll.track(event.clientY)
-    const onMove = (move: PointerEvent) => {
-      edgeScroll.track(move.clientY)
-      const delta =
-        outline.side === "right" ? startX - move.clientX : move.clientX - startX
-      setOutlinePref({
-        width: Math.min(
-          OUTLINE_MAX,
-          Math.max(OUTLINE_MIN, Math.round(startWidth + delta)),
-        ),
-      })
-    }
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove)
-      window.removeEventListener("pointerup", onUp)
-      edgeScroll.stop()
-    }
-    window.addEventListener("pointermove", onMove)
-    window.addEventListener("pointerup", onUp)
-  }
-
-  /** Drag the header left or right to swap which side the panel sits on. */
-  const startMove = (event: React.PointerEvent) => {
-    event.preventDefault()
-    const startX = event.clientX
-    edgeScroll.track(event.clientY)
-    const onMove = (move: PointerEvent) => edgeScroll.track(move.clientY)
-    const onUp = (up: PointerEvent) => {
-      const delta = up.clientX - startX
-      if (Math.abs(delta) > 60) {
-        setOutlinePref({ side: delta > 0 ? "right" : "left" })
-      }
-      window.removeEventListener("pointermove", onMove)
-      window.removeEventListener("pointerup", onUp)
-      edgeScroll.stop()
-    }
-    window.addEventListener("pointermove", onMove)
-    window.addEventListener("pointerup", onUp)
-  }
 
   const saveForm = () => {
     update({ status: "active" })
@@ -1319,7 +1370,7 @@ function SurveyBuilder({
           className={`builder-layout outline-${outline.side}${
             outline.collapsed ? " outline-collapsed" : ""
           }${outline.floating ? " outline-floating" : ""}`}
-          style={{ "--outline-w": `${outline.width}px` } as React.CSSProperties}
+          style={{ "--outline-w": outlineWidth(outline) } as React.CSSProperties}
         >
           <aside className="builder-outline">
             <span
@@ -1393,10 +1444,10 @@ function SurveyBuilder({
             ref={outlineListRef}
             onDragOver={(event) => {
               event.preventDefault()
-              edgeScroll.track(event.clientY)
+              trackOutlineScroll(event.clientY)
             }}
-            onDrop={edgeScroll.stop}
-            onDragLeave={edgeScroll.stop}
+            onDrop={stopOutlineScroll}
+            onDragLeave={stopOutlineScroll}
           >
             {survey.questions.map((question, index) => (
               <button
@@ -1407,9 +1458,9 @@ function SurveyBuilder({
                 }`}
                 onDragStart={(event) => {
                   event.dataTransfer.setData("text/plain", question.id)
-                  edgeScroll.track(event.clientY)
+                  trackOutlineScroll(event.clientY)
                 }}
-                onDragEnd={edgeScroll.stop}
+                onDragEnd={stopOutlineScroll}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => {
                   event.preventDefault()
@@ -2176,6 +2227,50 @@ function BatchQuestionEditor({
   )
 }
 
+/**
+ * An in-progress response, kept on this device so a closed tab or a reload
+ * mid-tally can be picked up on the same respondent. Keyed by survey, which is
+ * safe to share between accounts: survey ids are unique, and row-level security
+ * means only the owner ever loads a given one.
+ */
+type TallyDraft = {
+  identifier: string
+  answers: Record<string, Answer>
+  activeIndex: number
+  mode: TallyMode
+  savedAt: string
+}
+
+function draftKey(surveyId: string) {
+  return `tallyform.draft.${surveyId}`
+}
+
+function loadTallyDraft(surveyId: string): TallyDraft | null {
+  try {
+    const raw = window.localStorage.getItem(draftKey(surveyId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<TallyDraft>
+    if (!parsed.answers || typeof parsed.answers !== "object") return null
+    return {
+      identifier: typeof parsed.identifier === "string" ? parsed.identifier : "",
+      answers: parsed.answers,
+      activeIndex: Math.max(0, Number(parsed.activeIndex) || 0),
+      mode: parsed.mode === "tap" || parsed.mode === "grid" ? parsed.mode : "quick",
+      savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : "",
+    }
+  } catch {
+    return null
+  }
+}
+
+function clearTallyDraft(surveyId: string) {
+  try {
+    window.localStorage.removeItem(draftKey(surveyId))
+  } catch {
+    // Nothing to clean up if storage is unavailable.
+  }
+}
+
 function TallyWorkspace({
   survey,
   onChange,
@@ -2185,10 +2280,16 @@ function TallyWorkspace({
   onChange: (survey: Survey) => void
   onResults: () => void
 }) {
-  const [mode, setMode] = useState<TallyMode>("quick")
-  const [answers, setAnswers] = useState<Record<string, Answer>>({})
-  const [identifier, setIdentifier] = useState("")
-  const [activeIndex, setActiveIndex] = useState(0)
+  const [restored] = useState(() => loadTallyDraft(survey.id))
+  const [draftRestored, setDraftRestored] = useState(() =>
+    Boolean(restored && Object.keys(restored.answers).length > 0),
+  )
+  const [mode, setMode] = useState<TallyMode>(restored?.mode ?? "quick")
+  const [answers, setAnswers] = useState<Record<string, Answer>>(
+    restored?.answers ?? {},
+  )
+  const [identifier, setIdentifier] = useState(restored?.identifier ?? "")
+  const [activeIndex, setActiveIndex] = useState(restored?.activeIndex ?? 0)
   const [lastDeleted, setLastDeleted] = useState<ResponseRecord | null>(null)
   const [validationMessage, setValidationMessage] = useState("")
   const [lastSelection, setLastSelection] = useState<{
@@ -2211,6 +2312,47 @@ function TallyWorkspace({
   // which is what the save check has always allowed.
   const complete = questions.length > 0 && missingIndex === -1
   const answeredCount = Object.values(answers).filter(isAnswered).length
+
+  // Persist the response as it is being given, so an interruption — a closed
+  // tab, a reload, a crash — costs nothing. Written on every change, plus once
+  // more when the page goes away, which covers the last keystroke before a
+  // reload lands.
+  const writeDraft = useCallback(() => {
+    if (answeredCount === 0 && !identifier.trim()) return
+    const draft: TallyDraft = {
+      identifier,
+      answers,
+      activeIndex,
+      mode,
+      savedAt: new Date().toISOString(),
+    }
+    try {
+      window.localStorage.setItem(draftKey(survey.id), JSON.stringify(draft))
+    } catch {
+      // A full or unavailable store should never interrupt tallying.
+    }
+  }, [survey.id, identifier, answers, activeIndex, mode, answeredCount])
+
+  useEffect(() => {
+    writeDraft()
+  }, [writeDraft])
+
+  useEffect(() => {
+    const flush = () => writeDraft()
+    window.addEventListener("pagehide", flush)
+    // Deliberately no flush on cleanup: the effect above already persisted the
+    // latest state, and flushing here would re-write the draft moments after a
+    // save cleared it.
+    return () => window.removeEventListener("pagehide", flush)
+  }, [writeDraft])
+
+  const discardDraft = () => {
+    clearTallyDraft(survey.id)
+    setAnswers({})
+    setIdentifier("")
+    setActiveIndex(0)
+    setDraftRestored(false)
+  }
 
   // Switching between Quick keys, Tap form and Response grid changes the page
   // height, so each mode keeps its own scroll position instead of inheriting
@@ -2301,9 +2443,11 @@ function TallyWorkspace({
       updatedAt: now,
     }
     onChange({ ...survey, responses: [...survey.responses, record] })
+    clearTallyDraft(survey.id)
     setAnswers({})
     setIdentifier("")
     setActiveIndex(0)
+    setDraftRestored(false)
     setLastSelection(null)
   }
   const deleteRecord = (record: ResponseRecord) => {
@@ -2425,6 +2569,20 @@ function TallyWorkspace({
           Auto-advance
         </label>
       </div>
+      {draftRestored && (
+        <div className="draft-note" role="status">
+          <span>
+            <Icon name="undo" size={15} />
+            Draft picked up where you left off — {answeredCount} of{" "}
+            {questions.length} answered
+            {restored?.savedAt
+              ? `, last saved ${new Date(restored.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+              : ""}
+            {identifier.trim() ? ` for ${identifier.trim()}` : ""}.
+          </span>
+          <Button onClick={discardDraft}>Discard draft</Button>
+        </div>
+      )}
       {mode !== "grid" && (
         <div className="respondent-bar">
           <Field label={survey.identifierLabel}>
@@ -2886,14 +3044,33 @@ function ResponseGrid({
 
 function ResultsView({
   survey,
+  surveys,
   onChange,
+  onSelect,
+  onBackToSurveys,
   onTally,
 }: {
   survey: Survey
+  surveys: Survey[]
   onChange: (survey: Survey) => void
+  onSelect: (id: string) => void
+  onBackToSurveys: () => void
   onTally: () => void
 }) {
   const [tab, setTab] = useState<"summary" | "responses">("summary")
+  const panelListRef = useRef<HTMLDivElement>(null)
+  const {
+    pref: panel,
+    update: setPanelPref,
+    startResize,
+    startMove,
+  } = useDockablePanel(
+    RESULTS_PANEL_KEY,
+    RESULTS_PANEL_MIN,
+    RESULTS_PANEL_MAX,
+    260,
+    panelListRef,
+  )
   const questions = survey.questions.filter((q) => q.type !== "section")
   // One row per question per response, so the first two columns are always the
   // question and its answer — that is the shape people read in Excel. The wide
@@ -2953,6 +3130,102 @@ function ResultsView({
   const possible = Math.max(1, survey.responses.length * questions.length)
   return (
     <div className="page results-page">
+      <div
+        className={`builder-layout results-layout outline-${panel.side}${
+          panel.collapsed ? " outline-collapsed" : ""
+        }${panel.floating ? " outline-floating" : ""}`}
+        style={{ "--outline-w": outlineWidth(panel) } as React.CSSProperties}
+      >
+        <aside className="builder-outline results-outline">
+          <span
+            className="outline-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize survey panel"
+            onPointerDown={startResize}
+          />
+          <div
+            className="outline-head"
+            onPointerDown={startMove}
+            title="Drag to move the panel to the other side"
+          >
+            <Icon name="grip" size={14} />
+            <span className="outline-title">Surveys</span>
+            <span className="outline-count">{surveys.length}</span>
+            <button
+              className="outline-float"
+              type="button"
+              aria-label={
+                panel.floating
+                  ? "Dock the survey panel"
+                  : "Float the survey panel"
+              }
+              aria-pressed={panel.floating}
+              title={
+                panel.floating
+                  ? "Dock the survey panel"
+                  : "Float the survey panel"
+              }
+              onClick={() => setPanelPref({ floating: !panel.floating })}
+            >
+              <Icon name={panel.floating ? "dock" : "float"} size={14} />
+            </button>
+            <button
+              className="outline-collapse"
+              type="button"
+              aria-label={
+                panel.collapsed
+                  ? "Expand survey panel"
+                  : "Minimise survey panel"
+              }
+              aria-expanded={!panel.collapsed}
+              onClick={() => setPanelPref({ collapsed: !panel.collapsed })}
+            >
+              <Icon name={panel.collapsed ? "back" : "up"} size={14} />
+            </button>
+          </div>
+          {panel.collapsed ? null : (
+            <>
+              <div className="add-menu">
+                <button
+                  className="add-question"
+                  type="button"
+                  onClick={onBackToSurveys}
+                >
+                  <Icon name="back" size={15} />
+                  All surveys
+                </button>
+              </div>
+              <div className="question-list" ref={panelListRef}>
+                {surveys.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`question-list-item ${
+                      item.id === survey.id ? "active" : ""
+                    }`}
+                    onClick={() => onSelect(item.id)}
+                  >
+                    <span
+                      className={`question-number${
+                        item.responses.length ? "" : " empty"
+                      }`}
+                    >
+                      {item.responses.length || ""}
+                    </span>
+                    <span>
+                      <strong>{item.title || "Untitled"}</strong>
+                      <small>
+                        {item.questions.filter((q) => q.type !== "section").length}{" "}
+                        questions · {item.responses.length} responses
+                      </small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </aside>
+        <div className="results-body">
       <header className="compact-header">
         <div>
           <p className="eyebrow">Results</p>
@@ -3034,6 +3307,8 @@ function ResultsView({
           ))}
         </div>
       )}
+        </div>
+      </div>
     </div>
   )
 }
