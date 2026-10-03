@@ -6,8 +6,13 @@ import {
   type ChangeEvent,
   type ReactNode,
 } from "react"
-import { makeQuestion, makeSurvey, seedSurvey, uid } from "./data"
-import { downloadFile, loadSurveys, saveSurveys } from "./storage"
+import { makeQuestion, makeSurvey, uid } from "./data"
+import {
+  describeStorageError,
+  downloadFile,
+  loadSurveys,
+  syncSurveys,
+} from "./storage"
 import type {
   Answer,
   Question,
@@ -287,26 +292,54 @@ function csvCell(value: unknown) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`
 }
 
+// Debounced so rapid edits in the builder coalesce into a single round trip
+// instead of firing a request per keystroke.
+const SYNC_DEBOUNCE_MS = 700
+
 function App() {
-  const [surveys, setSurveys] = useState<Survey[]>(() =>
-    loadSurveys([seedSurvey()]),
-  )
-  const [selectedId, setSelectedId] = useState<string>(
-    () => surveys[0]?.id ?? "",
-  )
+  const [surveys, setSurveys] = useState<Survey[]>([])
+  const [selectedId, setSelectedId] = useState<string>("")
   const [view, setView] = useState<View>("surveys")
   const [notice, setNotice] = useState("")
+  const [loading, setLoading] = useState(true)
+  const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
   useEffect(() => {
-    try {
-      saveSurveys(surveys)
-    } catch {
-      setNotice(
-        "Browser storage is full. Export a JSON backup to protect your work.",
-      )
+    let cancelled = false
+    loadSurveys()
+      .then((loaded) => {
+        if (cancelled) return
+        syncedRef.current = loaded
+        setSurveys(loaded)
+        setSelectedId(loaded[0]?.id ?? "")
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setNotice(describeStorageError(error))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
     }
-  }, [surveys])
+  }, [])
+
+  useEffect(() => {
+    if (loading) return
+    const previous = syncedRef.current
+    const timer = window.setTimeout(() => {
+      syncSurveys(surveys, previous)
+        .then(() => {
+          syncedRef.current = surveys
+        })
+        .catch((error: unknown) => {
+          setNotice(describeStorageError(error))
+        })
+    }, SYNC_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [surveys, loading])
 
   useEffect(() => {
     if (!notice) return
@@ -333,6 +366,14 @@ function App() {
     const created = makeSurvey()
     setSurveys((current) => [created, ...current])
     openSurvey(created.id, "builder")
+  }
+
+  if (loading) {
+    return (
+      <div className="empty-state">
+        <h3>Loading your surveys…</h3>
+      </div>
+    )
   }
 
   if (!survey && view !== "surveys") setView("surveys")
@@ -382,8 +423,8 @@ function App() {
         <div className="sidebar-foot">
           <div className="privacy-dot" />
           <div>
-            <strong>Saved locally</strong>
-            <span>Your data stays on this device</span>
+            <strong>Synced to Supabase</strong>
+            <span>Shared workspace, no account</span>
           </div>
         </div>
       </aside>
