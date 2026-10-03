@@ -36,6 +36,16 @@ export interface ResponseRecord {
   updatedAt: string
 }
 
+/**
+ * A flat grouping of surveys. A survey with a null `folderId` is "Unfiled".
+ * Folders never nest — one level is all the app renders.
+ */
+export interface Folder {
+  id: string
+  name: string
+  createdAt: string
+}
+
 export interface Survey {
   id: string
   title: string
@@ -46,6 +56,8 @@ export interface Survey {
   responses: ResponseRecord[]
   autoAdvance: boolean
   autoSave: boolean
+  /** null means the survey sits in the Unfiled group. */
+  folderId: string | null
   createdAt: string
   updatedAt: string
 }

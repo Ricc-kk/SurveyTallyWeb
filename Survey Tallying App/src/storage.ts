@@ -1,4 +1,10 @@
-import type { Answer, Question, ResponseRecord, Survey } from "./types"
+import type {
+  Answer,
+  Folder,
+  Question,
+  ResponseRecord,
+  Survey,
+} from "./types"
 import { getUserId } from "./auth"
 import { MISSING_ENV_MESSAGE, supabase } from "./lib/supabase"
 
@@ -15,8 +21,28 @@ type SurveyRow = {
   questions: Question[]
   auto_advance: boolean
   auto_save: boolean
+  folder_id: string | null
   created_at: string
   updated_at: string
+}
+
+type FolderRow = {
+  id: string
+  name: string
+  created_at: string
+}
+
+/** Folders and surveys always travel together, so one load reads a consistent
+    snapshot and one sync writes both, in the order the foreign keys need. */
+export interface Workspace {
+  surveys: Survey[]
+  folders: Folder[]
+  /**
+   * False when the folders table is not there yet, i.e. supabase/
+   * folders-migration.sql has not been run. The app treats every survey as
+   * Unfiled rather than showing folder controls that cannot save.
+   */
+  foldersAvailable: boolean
 }
 
 type ResponseRow = {
@@ -49,8 +75,26 @@ function toSurveyRow(survey: Survey, userId: string) {
     questions: survey.questions,
     auto_advance: survey.autoAdvance,
     auto_save: survey.autoSave,
+    folder_id: survey.folderId,
     created_at: survey.createdAt,
     updated_at: survey.updatedAt,
+  }
+}
+
+function toFolderRow(folder: Folder, userId: string) {
+  return {
+    id: folder.id,
+    user_id: userId,
+    name: folder.name,
+    created_at: folder.createdAt,
+  }
+}
+
+function toFolder(row: FolderRow): Folder {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
   }
 }
 
@@ -90,6 +134,7 @@ function surveySignature(survey: Survey): string {
     survey.questions,
     survey.autoAdvance,
     survey.autoSave,
+    survey.folderId,
   ])
 }
 
@@ -110,6 +155,7 @@ function toSurvey(row: SurveyRow, responses: ResponseRow[]): Survey {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     autoAdvance: row.auto_advance,
     autoSave: row.auto_save,
+    folderId: row.folder_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -123,7 +169,7 @@ function toSurvey(row: SurveyRow, responses: ResponseRow[]): Survey {
  * empty state rather than seeding a demo, so a real account never mixes example
  * data with genuine responses.
  */
-export async function loadSurveys(): Promise<Survey[]> {
+export async function loadSurveys(): Promise<Workspace> {
   if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
 
   // RLS already scopes this query to the signed-in user; calling the helper here
@@ -132,16 +178,25 @@ export async function loadSurveys(): Promise<Survey[]> {
 
   localStorage.removeItem(LEGACY_STORAGE_KEY)
 
-  const [surveysResult, responsesResult] = await Promise.all([
+  const [surveysResult, responsesResult, foldersResult] = await Promise.all([
     supabase
       .from("surveys")
       .select("*")
       .order("updated_at", { ascending: false }),
     supabase.from("responses").select("*"),
+    // A missing folders table is not fatal: the app keeps working with every
+    // survey Unfiled, which is what happened before supabase/
+    // folders-migration.sql was run.
+    supabase.from("folders").select("*").order("created_at", { ascending: true }),
   ])
 
   if (surveysResult.error) throw new Error(surveysResult.error.message)
   if (responsesResult.error) throw new Error(responsesResult.error.message)
+
+  const folders =
+    foldersResult.error === null
+      ? ((foldersResult.data ?? []) as FolderRow[]).map(toFolder)
+      : []
 
   const surveyRows = (surveysResult.data ?? []) as SurveyRow[]
 
@@ -152,21 +207,30 @@ export async function loadSurveys(): Promise<Survey[]> {
     else responsesBySurvey.set(row.survey_id, [row])
   }
 
-  return surveyRows.map((row) => toSurvey(row, responsesBySurvey.get(row.id) ?? []))
+  return {
+    folders,
+    foldersAvailable: foldersResult.error === null,
+    surveys: surveyRows.map((row) =>
+      toSurvey(row, responsesBySurvey.get(row.id) ?? []),
+    ),
+  }
 }
 
-async function performSync(current: Survey[], previous: Survey[]): Promise<void> {
+async function performSync(
+  current: Workspace,
+  previous: Workspace,
+): Promise<void> {
   if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
 
   const userId = requireUserId()
 
-  const previousById = new Map(previous.map((survey) => [survey.id, survey]))
-  const currentIds = new Set(current.map((survey) => survey.id))
+  const previousById = new Map(previous.surveys.map((s) => [s.id, s]))
+  const currentIds = new Set(current.surveys.map((s) => s.id))
 
   const surveysToUpsert: Survey[] = []
   const surveyIdsToDelete: string[] = []
 
-  for (const survey of current) {
+  for (const survey of current.surveys) {
     const before = previousById.get(survey.id)
     if (!before || surveySignature(before) !== surveySignature(survey)) {
       surveysToUpsert.push(survey)
@@ -177,10 +241,20 @@ async function performSync(current: Survey[], previous: Survey[]): Promise<void>
     if (!currentIds.has(id)) surveyIdsToDelete.push(id)
   }
 
+  const previousFolderIds = new Set(previous.folders.map((f) => f.id))
+  const currentFolderIds = new Set(current.folders.map((f) => f.id))
+  const foldersToUpsert = current.folders.filter((folder) => {
+    const before = previous.folders.find((f) => f.id === folder.id)
+    return !before || before.name !== folder.name
+  })
+  const folderIdsToDelete = [...previousFolderIds].filter(
+    (id) => !currentFolderIds.has(id),
+  )
+
   const responsesToUpsert: Array<{ surveyId: string; record: ResponseRecord }> = []
   const responseIdsToDelete: string[] = []
 
-  for (const survey of current) {
+  for (const survey of current.surveys) {
     const before = previousById.get(survey.id)
     const previousResponses = new Map(
       (before?.responses ?? []).map((record) => [record.id, record]),
@@ -206,6 +280,24 @@ async function performSync(current: Survey[], previous: Survey[]): Promise<void>
       .from("surveys")
       .delete()
       .in("id", surveyIdsToDelete)
+    if (error) throw new Error(error.message)
+  }
+
+  // Deleting a folder sets surveys.folder_id to null; it never removes a survey.
+  if (folderIdsToDelete.length > 0) {
+    const { error } = await supabase
+      .from("folders")
+      .delete()
+      .in("id", folderIdsToDelete)
+    if (error) throw new Error(error.message)
+  }
+
+  // Folders first: a survey row carrying a folder_id needs that folder to exist
+  // before the foreign key is checked.
+  if (foldersToUpsert.length > 0) {
+    const { error } = await supabase
+      .from("folders")
+      .upsert(foldersToUpsert.map((folder) => toFolderRow(folder, userId)))
     if (error) throw new Error(error.message)
   }
 
@@ -242,7 +334,10 @@ async function performSync(current: Survey[], previous: Survey[]): Promise<void>
 // one and overwrite it.
 let syncChain: Promise<void> = Promise.resolve()
 
-export function syncSurveys(current: Survey[], previous: Survey[]): Promise<void> {
+export function syncSurveys(
+  current: Workspace,
+  previous: Workspace,
+): Promise<void> {
   const run = syncChain.then(() => performSync(current, previous))
   syncChain = run.then(
     () => undefined,

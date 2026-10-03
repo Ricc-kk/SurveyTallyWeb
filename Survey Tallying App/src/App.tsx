@@ -42,9 +42,11 @@ import {
   downloadFile,
   loadSurveys,
   syncSurveys,
+  type Workspace,
 } from "./storage"
 import type {
   Answer,
+  Folder,
   Question,
   QuestionType,
   ResponseRecord,
@@ -474,6 +476,98 @@ const OUTLINE_MIN = 210
 const OUTLINE_MAX = 460
 const RESULTS_PANEL_KEY = "tallyform.resultsPanel"
 
+// A custom order for the survey picker in the Results panel. The list arrives
+// sorted by "recently updated", which is the right default but not always the
+// one you want to read in. Same trade-off as the result cards: a display
+// preference only, and a reset is always one click away.
+const SURVEY_ORDER_KEY = "tallyform.surveyOrder"
+
+function loadSurveyOrder(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SURVEY_ORDER_KEY)
+    if (!raw) return []
+    const order = JSON.parse(raw) as unknown
+    if (!Array.isArray(order)) return []
+    return order.filter((id): id is string => typeof id === "string")
+  } catch {
+    return []
+  }
+}
+
+function saveSurveyOrder(ids: string[]) {
+  try {
+    if (ids.length === 0) window.localStorage.removeItem(SURVEY_ORDER_KEY)
+    else window.localStorage.setItem(SURVEY_ORDER_KEY, JSON.stringify(ids))
+  } catch {
+    // List order is best-effort.
+  }
+}
+
+const FOLDER_ORDER_KEY = "tallyform.folderOrder"
+
+function loadFolderOrder(): string[] {
+  try {
+    const raw = window.localStorage.getItem(FOLDER_ORDER_KEY)
+    if (!raw) return []
+    const order = JSON.parse(raw) as unknown
+    if (!Array.isArray(order)) return []
+    return order.filter((id): id is string => typeof id === "string")
+  } catch {
+    return []
+  }
+}
+
+function saveFolderOrder(ids: string[]) {
+  try {
+    if (ids.length === 0) window.localStorage.removeItem(FOLDER_ORDER_KEY)
+    else window.localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(ids))
+  } catch {
+    // Folder order is best-effort.
+  }
+}
+
+const UNFILED = ""
+
+export interface FolderSection {
+  folder: Folder | null
+  surveys: Survey[]
+}
+
+/**
+ * Folders in their saved order, then any folder created since, then an Unfiled
+ * group at the bottom.
+ *
+ * A survey pointing at a folder that no longer exists is treated as Unfiled
+ * rather than dropped: the row would otherwise disappear from every group.
+ */
+function folderSections(
+  folders: Folder[],
+  surveys: Survey[],
+  order: string[],
+): FolderSection[] {
+  const known = new Set(folders.map((folder) => folder.id))
+  const byFolder = new Map<string, Survey[]>()
+  for (const item of surveys) {
+    const key = item.folderId && known.has(item.folderId) ? item.folderId : UNFILED
+    const list = byFolder.get(key)
+    if (list) list.push(item)
+    else byFolder.set(key, [item])
+  }
+  const ranked = new Map(order.map((id, index) => [id, index]))
+  const ordered = [...folders].sort(
+    (a, b) =>
+      (ranked.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (ranked.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  )
+  return [
+    ...ordered.map((folder) => ({
+      folder,
+      surveys: byFolder.get(folder.id) ?? [],
+    })),
+    { folder: null, surveys: byFolder.get(UNFILED) ?? [] },
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Result card order
 // ---------------------------------------------------------------------------
@@ -665,6 +759,8 @@ const TO_TOP_HIDE_MS = 3000
 
 function App() {
   const [surveys, setSurveys] = useState<Survey[]>([])
+  const [folders, setFolders] = useState<Folder[]>([])
+  const [foldersOff, setFoldersOff] = useState(false)
   const [selectedId, setSelectedId] = useState<string>("")
   const [view, setView] = useState<View>("surveys")
   const [notice, setNotice] = useState("")
@@ -691,7 +787,7 @@ function App() {
   // would also trigger "go home". A deadline rather than a flag, so a drag that
   // ends off the button and never produces a click can't swallow the next one.
   const brandClickBlockedUntilRef = useRef(0)
-  const syncedRef = useRef<Survey[]>([])
+  const syncedRef = useRef<Workspace>({ surveys: [], folders: [], foldersAvailable: true })
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
   // Deliberately the user id rather than the session object: Supabase hands out
@@ -779,8 +875,9 @@ function App() {
     if (!authReady) return
 
     if (!userId) {
-      syncedRef.current = []
+      syncedRef.current = { surveys: [], folders: [], foldersAvailable: true }
       setSurveys([])
+      setFolders([])
       setSelectedId("")
       setLoading(false)
       return
@@ -798,8 +895,10 @@ function App() {
       .then((loaded) => {
         if (cancelled) return
         syncedRef.current = loaded
-        setSurveys(loaded)
-        setSelectedId(loaded[0]?.id ?? "")
+        setSurveys(loaded.surveys)
+        setFolders(loaded.folders)
+        setFoldersOff(!loaded.foldersAvailable)
+        setSelectedId(loaded.surveys[0]?.id ?? "")
         setHasLoadedOnce(true)
       })
       .catch((error: unknown) => {
@@ -818,16 +917,16 @@ function App() {
     if (loading || !userId) return
     const previous = syncedRef.current
     const timer = window.setTimeout(() => {
-      syncSurveys(surveys, previous)
+      syncSurveys({ surveys, folders, foldersAvailable: true }, previous)
         .then(() => {
-          syncedRef.current = surveys
+          syncedRef.current = { surveys, folders, foldersAvailable: true }
         })
         .catch((error: unknown) => {
           setNotice(describeStorageError(error))
         })
     }, SYNC_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [surveys, loading, userId])
+  }, [surveys, folders, loading, userId])
 
   useEffect(() => {
     if (!notice) return
@@ -894,6 +993,64 @@ function App() {
     const created = makeSurvey()
     setSurveys((current) => [created, ...current])
     openSurvey(created.id, "builder")
+  }
+
+  // -------------------------------------------------------------------------
+  // Folders
+  // -------------------------------------------------------------------------
+  // Folders live in Supabase alongside the surveys, so an organisation set up
+  // here follows the account to another device. The saved display orders are the
+  // one exception: those are per browser.
+
+  const createFolder = (rawName: string) => {
+    const name = rawName.trim().slice(0, 80)
+    if (!name) return
+    setFolders((current) => [
+      ...current,
+      { id: uid(), name, createdAt: new Date().toISOString() },
+    ])
+    setNotice(`Folder “${name}” created`)
+  }
+
+  const renameFolder = (id: string, rawName: string) => {
+    const name = rawName.trim().slice(0, 80)
+    if (!name) return
+    setFolders((current) =>
+      current.map((folder) => (folder.id === id ? { ...folder, name } : folder)),
+    )
+  }
+
+  /**
+   * Removing a folder removes the surveys inside it too. The surveys leave the
+   * state, so the existing sync diff deletes their rows, which cascades to their
+   * responses. The saved display orders are trimmed as well, otherwise they keep
+   * naming surveys and folders that no longer exist.
+   */
+  const deleteFolder = (id: string) => {
+    const folder = folders.find((f) => f.id === id)
+    const doomed = new Set(
+      surveys.filter((item) => item.folderId === id).map((item) => item.id),
+    )
+    const surveyOrder = loadSurveyOrder().filter((surveyId) => !doomed.has(surveyId))
+    saveSurveyOrder(surveyOrder)
+    saveFolderOrder(loadFolderOrder().filter((folderId) => folderId !== id))
+    setFolders((current) => current.filter((f) => f.id !== id))
+    setSurveys((current) => current.filter((item) => !doomed.has(item.id)))
+    setNotice(
+      `Deleted “${folder?.name ?? "folder"}”${
+        doomed.size ? ` and ${doomed.size} ${doomed.size === 1 ? "survey" : "surveys"}` : ""
+      }`,
+    )
+  }
+
+  const moveSurveyToFolder = (surveyId: string, folderId: string | null) => {
+    setSurveys((current) =>
+      current.map((item) =>
+        item.id === surveyId
+          ? { ...item, folderId: folderId || null }
+          : item,
+      ),
+    )
   }
 
   if (!authReady) {
@@ -1129,6 +1286,11 @@ function App() {
         <div className="view-pane" hidden={activeView !== "surveys"}>
           <SurveyLibrary
             surveys={surveys}
+            folders={folders}
+            foldersAvailable={!foldersOff}
+            onCreateFolder={createFolder}
+            onRenameFolder={renameFolder}
+            onDeleteFolder={deleteFolder}
             onCreate={createSurvey}
             onOpen={openSurvey}
             onDuplicate={(item) => {
@@ -1193,6 +1355,12 @@ function App() {
             <ResultsView
               survey={survey}
               surveys={surveys}
+              folders={folders}
+              foldersAvailable={!foldersOff}
+              onCreateFolder={createFolder}
+              onRenameFolder={renameFolder}
+              onDeleteFolder={deleteFolder}
+              onMoveSurvey={moveSurveyToFolder}
               onChange={(next) => updateSurvey(survey.id, () => next)}
               onSelect={setSelectedId}
               onBackToSurveys={() => setView("surveys")}
@@ -1269,8 +1437,271 @@ function NavItem({
   )
 }
 
+function SurveyCard({
+  item,
+  onOpen,
+  onDuplicate,
+  onDelete,
+}: {
+  item: Survey
+  onOpen: (id: string, view: View) => void
+  onDuplicate: (survey: Survey) => void
+  onDelete: (id: string) => void
+}) {
+  return (
+    <article className="survey-card">
+      <div className="survey-card-top">
+        <span className={`status status-${item.status}`}>{item.status}</span>
+        <Button variant="ghost" aria-label={`More actions for ${item.title}`}>
+          <Icon name="more" />
+        </Button>
+      </div>
+      <div className="survey-card-copy">
+        <h2>{item.title}</h2>
+        <p>{item.description || "No description yet."}</p>
+      </div>
+      <div className="card-stats">
+        <span>
+          <strong>
+            {item.questions.filter((q) => q.type !== "section").length}
+          </strong>{" "}
+          questions
+        </span>
+        <span>
+          <strong>{item.responses.length}</strong> responses
+        </span>
+      </div>
+      <div className="card-actions">
+        <Button variant="primary" onClick={() => onOpen(item.id, "tally")}>
+          Start tallying <Icon name="arrow" />
+        </Button>
+        <Button aria-label="Edit survey" onClick={() => onOpen(item.id, "builder")}>
+          <Icon name="builder" />
+        </Button>
+        <Button aria-label="Duplicate survey" onClick={() => onDuplicate(item)}>
+          <Icon name="copy" />
+        </Button>
+        <Button variant="ghost" aria-label="Delete survey" onClick={() => onDelete(item.id)}>
+          <Icon name="trash" />
+        </Button>
+      </div>
+    </article>
+  )
+}
+
+/**
+ * The "New folder" control. A button until it is pressed, then a name field,
+ * so an empty folder row never sits in the list waiting to be filled in.
+ */
+function FolderCreate({
+  onCreate,
+}: {
+  onCreate: (name: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState("")
+
+  if (!open) {
+    return (
+      <button
+        className="add-question"
+        type="button"
+        onClick={() => {
+          setOpen(true)
+          setName("")
+        }}
+      >
+        <Icon name="plus" size={15} />
+        New folder
+      </button>
+    )
+  }
+
+  const submit = () => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    onCreate(trimmed)
+    setName("")
+    setOpen(false)
+  }
+
+  return (
+    <div className="folder-create">
+      <input
+        className="input"
+        value={name}
+        autoFocus
+        maxLength={80}
+        placeholder="Folder name"
+        aria-label="Folder name"
+        onChange={(event) => setName(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") submit()
+          if (event.key === "Escape") setOpen(false)
+        }}
+      />
+      <Button variant="primary" onClick={submit} disabled={!name.trim()}>
+        <Icon name="check" size={14} />
+        Add
+      </Button>
+      <Button onClick={() => setOpen(false)}>Cancel</Button>
+    </div>
+  )
+}
+
+/**
+ * Rename and delete for one folder.
+ *
+ * Deleting a folder takes its surveys and their responses with it, so the count
+ * is spelled out before the button rather than discovered afterwards. The
+ * confirmation lives here instead of in a window.confirm, which cannot say what
+ * would be lost.
+ */
+function FolderEdit({
+  folder,
+  surveyCount,
+  onRename,
+  onDelete,
+  onClose,
+}: {
+  folder: Folder
+  surveyCount: number
+  onRename: (name: string) => void
+  onDelete: () => void
+  onClose: () => void
+}) {
+  const [name, setName] = useState(folder.name)
+  const [confirming, setConfirming] = useState(false)
+
+  return (
+    <div className="folder-edit">
+      <input
+        className="input"
+        value={name}
+        autoFocus
+        maxLength={80}
+        aria-label="Folder name"
+        onChange={(event) => setName(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && name.trim()) onRename(name.trim())
+          if (event.key === "Escape") onClose()
+        }}
+      />
+      <div className="folder-edit-actions">
+        <Button
+          variant="primary"
+          disabled={!name.trim() || name.trim() === folder.name}
+          onClick={() => onRename(name.trim())}
+        >
+          <Icon name="check" size={14} />
+          Save name
+        </Button>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="danger" onClick={() => setConfirming(true)}>
+          <Icon name="trash" size={14} />
+          Delete folder
+        </Button>
+      </div>
+
+      {confirming && (
+        <div className="folder-confirm">
+          <p>
+            <strong>{folder.name}</strong> holds {surveyCount}{" "}
+            {surveyCount === 1 ? "survey" : "surveys"}. Deleting it deletes{" "}
+            {surveyCount === 1 ? "that survey" : "those surveys"} and every
+            response tallied in {surveyCount === 1 ? "it" : "them"}. This cannot
+            be undone.
+          </p>
+          <div className="folder-edit-actions">
+            <Button
+              variant="danger"
+              onClick={() => {
+                onDelete()
+                onClose()
+              }}
+            >
+              <Icon name="trash" size={14} />
+              Delete folder and {surveyCount}{" "}
+              {surveyCount === 1 ? "survey" : "surveys"}
+            </Button>
+            <Button onClick={() => setConfirming(false)}>Keep it</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A folder's heading. Collapses its group, opens the rename/delete panel, and
+ * is both a drop target for surveys and a drag source for reordering folders.
+ */
+function FolderHead({
+  folder,
+  count,
+  expanded,
+  editing,
+  onToggle,
+  onEdit,
+  dragProps,
+  dropProps,
+  dragOver,
+  dragging,
+}: {
+  folder: Folder | null
+  count: number
+  expanded: boolean
+  editing: boolean
+  onToggle: () => void
+  onEdit: () => void
+  dragProps?: HTMLAttributes<HTMLElement>
+  dropProps?: HTMLAttributes<HTMLElement>
+  dragOver?: boolean
+  dragging?: boolean
+}) {
+  const label = folder ? folder.name : "Unfiled"
+  return (
+    <div
+      className={`folder-head ${folder ? "" : "unfiled"} ${
+        dragOver ? "drop-target" : ""
+      } ${dragging ? "dragging" : ""}`}
+      {...dragProps}
+      {...dropProps}
+    >
+      <button
+        className="folder-toggle"
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} ${label}`}
+      >
+        <Icon name={expanded ? "up" : "arrow"} size={13} />
+      </button>
+      <span className="folder-name">{label}</span>
+      <span className="folder-count">{count}</span>
+      {folder && (
+        <button
+          className="folder-menu"
+          type="button"
+          aria-label={`Rename or delete ${label}`}
+          title="Rename or delete"
+          onClick={onEdit}
+        >
+          <Icon name="more" size={14} />
+        </button>
+      )}
+      {editing && folder && <span className="folder-editing-dot" aria-hidden="true" />}
+    </div>
+  )
+}
+
 function SurveyLibrary({
   surveys,
+  folders,
+  foldersAvailable,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
   onCreate,
   onOpen,
   onDuplicate,
@@ -1278,6 +1709,11 @@ function SurveyLibrary({
   onImport,
 }: {
   surveys: Survey[]
+  folders: Folder[]
+  foldersAvailable: boolean
+  onCreateFolder: (name: string) => void
+  onRenameFolder: (id: string, name: string) => void
+  onDeleteFolder: (id: string) => void
   onCreate: () => void
   onOpen: (id: string, view: View) => void
   onDuplicate: (survey: Survey) => void
@@ -1285,10 +1721,16 @@ function SurveyLibrary({
   onImport: (survey: Survey) => void
 }) {
   const [search, setSearch] = useState("")
+  const [editingId, setEditingId] = useState("")
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [name, setName] = useState("")
   const importRef = useRef<HTMLInputElement>(null)
   const filtered = surveys.filter((survey) =>
     survey.title.toLowerCase().includes(search.toLowerCase()),
   )
+  const sections = foldersAvailable
+    ? folderSections(folders, filtered, [])
+    : [{ folder: null, surveys: filtered }]
   const totalResponses = surveys.reduce(
     (sum, item) => sum + item.responses.length,
     0,
@@ -1360,64 +1802,64 @@ function SurveyLibrary({
           {filtered.length} {filtered.length === 1 ? "survey" : "surveys"}
         </span>
       </div>
+      {foldersAvailable && (
+        <div className="library-folders">
+          <FolderCreate onCreate={onCreateFolder} />
+        </div>
+      )}
+
+      {sections.map((section) => {
+        const key = section.folder?.id ?? UNFILED
+        const expanded = collapsed[key] === undefined ? true : !collapsed[key]
+        // With no folders to show and nothing filed, the Unfiled heading is just
+        // a label above the grid, so it is left out.
+        const showHead = foldersAvailable && (section.folder !== null || sections.length > 1)
+        if (!showHead && section.surveys.length === 0) return null
+        return (
+          <div className="folder-section" key={key}>
+            {showHead && (
+              <FolderHead
+                folder={section.folder}
+                count={section.surveys.length}
+                expanded={expanded}
+                editing={editingId === key}
+                onToggle={() => setCollapsed((c) => ({ ...c, [key]: expanded }))}
+                onEdit={() => {
+                  setEditingId(editingId === key ? "" : key)
+                  setName("")
+                }}
+              />
+            )}
+            {editingId === key && section.folder && (
+              <FolderEdit
+                folder={section.folder}
+                surveyCount={section.surveys.length}
+                onRename={(name) => {
+                  onRenameFolder(section.folder!.id, name)
+                  setEditingId("")
+                }}
+                onDelete={() => onDeleteFolder(section.folder!.id)}
+                onClose={() => setEditingId("")}
+              />
+            )}
+            {expanded && section.surveys.length > 0 && (
+              <section className="survey-grid">
+                {section.surveys.map((item) => (
+                  <SurveyCard
+                    key={item.id}
+                    item={item}
+                    onOpen={onOpen}
+                    onDuplicate={onDuplicate}
+                    onDelete={onDelete}
+                  />
+                ))}
+              </section>
+            )}
+          </div>
+        )
+      })}
+
       <section className="survey-grid">
-        {filtered.map((item) => (
-          <article className="survey-card" key={item.id}>
-            <div className="survey-card-top">
-              <span className={`status status-${item.status}`}>
-                {item.status}
-              </span>
-              <Button
-                variant="ghost"
-                aria-label={`More actions for ${item.title}`}
-              >
-                <Icon name="more" />
-              </Button>
-            </div>
-            <div className="survey-card-copy">
-              <h2>{item.title}</h2>
-              <p>{item.description || "No description yet."}</p>
-            </div>
-            <div className="card-stats">
-              <span>
-                <strong>
-                  {item.questions.filter((q) => q.type !== "section").length}
-                </strong>{" "}
-                questions
-              </span>
-              <span>
-                <strong>{item.responses.length}</strong> responses
-              </span>
-            </div>
-            <div className="card-actions">
-              <Button
-                variant="primary"
-                onClick={() => onOpen(item.id, "tally")}
-              >
-                Start tallying <Icon name="arrow" />
-              </Button>
-              <Button
-                aria-label="Edit survey"
-                onClick={() => onOpen(item.id, "builder")}
-              >
-                <Icon name="builder" />
-              </Button>
-              <Button
-                aria-label="Duplicate survey"
-                onClick={() => onDuplicate(item)}
-              >
-                <Icon name="copy" />
-              </Button>
-              <Button
-                variant="ghost"
-                aria-label="Delete survey"
-                onClick={() => onDelete(item.id)}
-              >
-                <Icon name="trash" />
-              </Button>
-            </div>
-          </article>
-        ))}
         <button className="new-card" onClick={onCreate}>
           <span>
             <Icon name="plus" />
@@ -4079,6 +4521,12 @@ function ResponseEditor({
 function ResultsView({
   survey,
   surveys,
+  folders,
+  foldersAvailable,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  onMoveSurvey,
   onChange,
   onSelect,
   onBackToSurveys,
@@ -4086,6 +4534,12 @@ function ResultsView({
 }: {
   survey: Survey
   surveys: Survey[]
+  folders: Folder[]
+  foldersAvailable: boolean
+  onCreateFolder: (name: string) => void
+  onRenameFolder: (id: string, name: string) => void
+  onDeleteFolder: (id: string) => void
+  onMoveSurvey: (surveyId: string, folderId: string | null) => void
   onChange: (survey: Survey) => void
   onSelect: (id: string) => void
   onBackToSurveys: () => void
@@ -4094,6 +4548,23 @@ function ResultsView({
   const [tab, setTab] = useState<"summary" | "responses">("summary")
   const [editing, setEditing] = useState<ResponseRecord | null>(null)
   const [order, setOrder] = useState<string[]>([])
+  const [surveyOrder, setSurveyOrder] = useState<string[]>([])
+  const [folderOrder, setFolderOrder] = useState<string[]>([])
+  const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({})
+  const [editingFolderId, setEditingFolderId] = useState("")
+  const [draggingSurveyId, setDraggingSurveyId] = useState("")
+  const [dropSurveyId, setDropSurveyId] = useState("")
+  const [dropFolderId, setDropFolderId] = useState("")
+  const [draggingFolderId, setDraggingFolderId] = useState("")
+  // A finished drag can still be followed by a click on the row it landed on.
+  // A deadline rather than a flag, matching the sidebar brand, so a drag that
+  // never produces a click cannot swallow the next real one.
+  const surveyClickBlockedUntilRef = useRef(0)
+
+  useEffect(() => {
+    setSurveyOrder(loadSurveyOrder())
+    setFolderOrder(loadFolderOrder())
+  }, [])
   const [draggingId, setDraggingId] = useState("")
   const [dropTargetId, setDropTargetId] = useState("")
 
@@ -4110,6 +4581,8 @@ function ResultsView({
     update: setPanelPref,
     startResize,
     startMove,
+    trackEdgeScroll,
+    stopEdgeScroll,
   } = useDockablePanel(
     RESULTS_PANEL_KEY,
     RESULTS_PANEL_MIN,
@@ -4159,6 +4632,127 @@ function ResultsView({
   const resetOrder = () => {
     setOrder([])
     saveResultOrder(survey.id, [])
+  }
+
+  const orderedSurveys = useMemo(() => {
+    if (surveyOrder.length === 0) return surveys
+    const byId = new Map(surveys.map((item) => [item.id, item]))
+    const placed = new Set<string>()
+    const result: Survey[] = []
+    for (const id of surveyOrder) {
+      const item = byId.get(id)
+      if (item && !placed.has(id)) {
+        result.push(item)
+        placed.add(id)
+      }
+    }
+    // Surveys the saved order has never seen keep the order they arrived in, so
+    // a brand new one lands at the bottom instead of disappearing.
+    for (const item of surveys) {
+      if (!placed.has(item.id)) result.push(item)
+    }
+    return result
+  }, [surveys, surveyOrder])
+
+  const sections = foldersAvailable
+    ? folderSections(folders, orderedSurveys, folderOrder)
+    : [{ folder: null, surveys: orderedSurveys }]
+
+  const reorderSurveys = (sourceId: string, targetId: string) => {
+    if (!sourceId || sourceId === targetId) return
+    const next = [...orderedSurveys]
+    const from = next.findIndex((item) => item.id === sourceId)
+    const to = next.findIndex((item) => item.id === targetId)
+    if (from < 0 || to < 0) return
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    const ids = next.map((item) => item.id)
+    setSurveyOrder(ids)
+    saveSurveyOrder(ids)
+  }
+
+  const resetSurveyOrder = () => {
+    setSurveyOrder([])
+    saveSurveyOrder([])
+  }
+
+  const surveyDrag = (id: string): HTMLAttributes<HTMLElement> => ({
+    draggable: true,
+    onDragStart: (event: DragEvent<HTMLElement>) => {
+      event.dataTransfer.setData("text/plain", `survey:${id}`)
+      setDraggingSurveyId(id)
+      trackEdgeScroll(event.clientY)
+    },
+    onDragEnd: () => {
+      setDraggingSurveyId("")
+      setDropSurveyId("")
+      stopEdgeScroll()
+      surveyClickBlockedUntilRef.current = Date.now() + 250
+    },
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      trackEdgeScroll(event.clientY)
+      if (dropSurveyId !== id) setDropSurveyId(id)
+    },
+    onDragLeave: () => setDropSurveyId(""),
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      stopEdgeScroll()
+      reorderSurveys(event.dataTransfer.getData("text/plain"), id)
+      setDraggingSurveyId("")
+      setDropSurveyId("")
+    },
+  })
+
+  /**
+   * Folder headings take two kinds of drop: a survey, which joins the folder,
+   * or another folder, which swaps places with it. The payload is prefixed so
+   * one handler can tell them apart.
+   */
+  const folderDrag = (id: string): HTMLAttributes<HTMLElement> => ({
+    draggable: true,
+    onDragStart: (event: DragEvent<HTMLElement>) => {
+      event.dataTransfer.setData("text/plain", `folder:${id}`)
+      event.dataTransfer.effectAllowed = "move"
+      setDraggingFolderId(id)
+    },
+    onDragEnd: () => {
+      setDraggingFolderId("")
+      setDropFolderId("")
+    },
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      trackEdgeScroll(event.clientY)
+      if (dropFolderId !== id) setDropFolderId(id)
+    },
+    onDragLeave: () => setDropFolderId(""),
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault()
+      stopEdgeScroll()
+      const payload = event.dataTransfer.getData("text/plain")
+      if (payload.startsWith("survey:")) {
+        onMoveSurvey(payload.slice("survey:".length), id || null)
+      } else if (payload.startsWith("folder:")) {
+        reorderFolders(payload.slice("folder:".length), id)
+      }
+      setDropFolderId("")
+      setDropSurveyId("")
+    },
+  })
+
+  const reorderFolders = (sourceId: string, targetId: string) => {
+    if (!sourceId || sourceId === targetId) return
+    const next = [...sections]
+      .map((section) => section.folder)
+      .filter((folder): folder is Folder => folder !== null)
+    const from = next.findIndex((folder) => folder.id === sourceId)
+    const to = next.findIndex((folder) => folder.id === targetId)
+    if (from < 0 || to < 0) return
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    const ids = next.map((folder) => folder.id)
+    setFolderOrder(ids)
+    saveFolderOrder(ids)
   }
 
   const cardDrag = (questionId: string): HTMLAttributes<HTMLElement> => ({
@@ -4297,41 +4891,136 @@ function ResultsView({
           </div>
           {panel.collapsed ? null : (
             <>
-              <div className="add-menu">
-                <button
-                  className="add-question"
-                  type="button"
-                  onClick={onBackToSurveys}
-                >
-                  <Icon name="back" size={15} />
-                  All surveys
-                </button>
-              </div>
-              <div className="question-list" ref={panelListRef}>
-                {surveys.map((item) => (
+              <div
+                className={`add-menu ${surveyOrder.length ? "two-up" : ""}`}
+              >
+                {foldersAvailable && <FolderCreate onCreate={onCreateFolder} />}
+                <div className="add-menu-row">
                   <button
-                    key={item.id}
-                    className={`question-list-item ${
-                      item.id === survey.id ? "active" : ""
-                    }`}
-                    onClick={() => onSelect(item.id)}
+                    className="add-question"
+                    type="button"
+                    onClick={onBackToSurveys}
                   >
-                    <span
-                      className={`question-number${
-                        item.responses.length ? "" : " empty"
-                      }`}
-                    >
-                      {item.responses.length || ""}
-                    </span>
-                    <span>
-                      <strong>{item.title || "Untitled"}</strong>
-                      <small>
-                        {item.questions.filter((q) => q.type !== "section").length}{" "}
-                        questions · {item.responses.length} responses
-                      </small>
-                    </span>
+                    <Icon name="back" size={15} />
+                    All surveys
                   </button>
-                ))}
+                  {surveyOrder.length > 0 && (
+                    <button
+                      className="add-question"
+                      type="button"
+                      title="Back to the most recently updated order"
+                      onClick={resetSurveyOrder}
+                    >
+                      <Icon name="undo" size={15} />
+                      Reset order
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div
+                className="question-list"
+                ref={panelListRef}
+                onDragOver={(event: DragEvent<HTMLDivElement>) => {
+                  event.preventDefault()
+                  trackEdgeScroll(event.clientY)
+                }}
+                onDragLeave={stopEdgeScroll}
+              >
+                {sections.map((section) => {
+                  const key = section.folder?.id ?? UNFILED
+                  const expanded =
+                    collapsedFolders[key] === undefined
+                      ? true
+                      : !collapsedFolders[key]
+                  return (
+                    <div className="folder-group" key={key}>
+                      {foldersAvailable && (
+                        <FolderHead
+                          folder={section.folder}
+                          count={section.surveys.length}
+                          expanded={expanded}
+                          editing={editingFolderId === key}
+                          dragOver={dropFolderId === key}
+                          dragging={draggingFolderId === section.folder?.id}
+                          dragProps={
+                            section.folder
+                              ? folderDrag(section.folder.id)
+                              : undefined
+                          }
+                          onToggle={() =>
+                            setCollapsedFolders((current) => ({
+                              ...current,
+                              [key]: expanded,
+                            }))
+                          }
+                          onEdit={() =>
+                            setEditingFolderId(
+                              editingFolderId === key ? "" : key,
+                            )
+                          }
+                        />
+                      )}
+                      {editingFolderId === key && section.folder && (
+                        <FolderEdit
+                          folder={section.folder}
+                          surveyCount={section.surveys.length}
+                          onRename={(name) => {
+                            onRenameFolder(section.folder!.id, name)
+                            setEditingFolderId("")
+                          }}
+                          onDelete={() => onDeleteFolder(section.folder!.id)}
+                          onClose={() => setEditingFolderId("")}
+                        />
+                      )}
+                      {expanded && (
+                        <div className="folder-items">
+                          {section.surveys.length === 0 ? (
+                            <p className="folder-empty">
+                              Drag a survey here to file it
+                            </p>
+                          ) : (
+                            section.surveys.map((item) => (
+                              <button
+                                key={item.id}
+                                className={`question-list-item ${
+                                  item.id === survey.id ? "active" : ""
+                                } ${
+                                  draggingSurveyId === item.id ? "dragging" : ""
+                                } ${dropSurveyId === item.id ? "drop-target" : ""}`}
+                                onClick={() => {
+                                  if (
+                                    Date.now() <
+                                    surveyClickBlockedUntilRef.current
+                                  )
+                                    return
+                                  onSelect(item.id)
+                                }}
+                                {...surveyDrag(item.id)}
+                              >
+                                <span
+                                  className={`question-number${
+                                    item.responses.length ? "" : " empty"
+                                  }`}
+                                >
+                                  {item.responses.length || ""}
+                                </span>
+                                <span>
+                                  <strong>{item.title || "Untitled"}</strong>
+                                  <small>
+                                    {item.questions.filter(
+                                      (q) => q.type !== "section",
+                                    ).length}{" "}
+                                    questions · {item.responses.length} responses
+                                  </small>
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </>
           )}

@@ -39,6 +39,7 @@ export function makeSurvey(title = "Untitled survey"): Survey {
     responses: [],
     autoAdvance: true,
     autoSave: false,
+    folderId: null,
     createdAt: now,
     updatedAt: now,
   }

@@ -337,6 +337,46 @@ h2 { letter-spacing: -.025em; }
 .question-number.empty { background: transparent; }
 .question-list-item.active .question-number { background: var(--primary-soft); color: var(--primary); }
 .add-menu { flex: 0 0 auto; border-bottom: 1px solid var(--add-menu-line); margin-bottom: 14px; padding-bottom: 14px; }
+.add-menu.two-up { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.add-menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.add-menu-row:only-child { grid-template-columns: 1fr; }
+.folder-create { display: flex; gap: 6px; margin-bottom: 8px; }
+.folder-create .input { flex: 1 1 auto; min-width: 0; min-height: 38px; }
+.folder-create .btn { padding: 8px 10px; }
+
+/* Folders ------------------------------------------------------------------ */
+
+.folder-group { display: flex; flex-direction: column; }
+.folder-section { display: flex; flex-direction: column; gap: 12px; margin-bottom: 22px; }
+.library-folders { margin-bottom: 18px; }
+
+.folder-head { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 9px; border: 1px solid transparent; color: var(--ink); }
+.results-outline .folder-head { cursor: grab; }
+.results-outline .folder-head.unfiled { cursor: default; }
+.folder-head.drop-target { border-color: var(--primary); background: var(--primary-soft); }
+.folder-head.dragging { opacity: .4; }
+.folder-head.unfiled { color: var(--muted); }
+.folder-toggle { flex: 0 0 auto; display: grid; place-items: center; width: 20px; height: 20px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.folder-toggle .icon { transition: transform .18s ease; }
+.folder-toggle[aria-expanded="true"] .icon { transform: rotate(180deg); }
+.folder-name { flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 800; letter-spacing: .01em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.folder-count { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: var(--surface-quiet); color: var(--muted); font-size: 10px; font-weight: 700; }
+.folder-menu { flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.folder-menu:hover { background: var(--surface-quiet); color: var(--ink); }
+.folder-editing-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: 0 0 auto; }
+.folder-items { display: flex; flex-direction: column; gap: 6px; }
+.folder-empty { margin: 2px 0; padding: 9px 10px; border: 1px dashed var(--add-menu-line); border-radius: 9px; color: var(--muted); font-size: 11px; text-align: center; }
+.folder-edit { display: grid; gap: 8px; margin: 4px 0 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.folder-edit .input { min-height: 36px; }
+.folder-edit-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.folder-confirm { padding: 10px; border: 1px solid var(--danger-line); border-radius: 9px; background: var(--danger-soft); }
+.folder-confirm p { margin: 0 0 10px; color: var(--ink); font-size: 12px; line-height: 1.55; }
+/* Only the survey picker reorders by drag; the builder's question rows keep the
+   pointer cursor they have always had. */
+.results-outline .question-list-item { cursor: grab; }
+.results-outline .question-list-item:active { cursor: grabbing; }
+.results-outline .question-list-item.dragging { opacity: .4; }
+.results-outline .question-list-item.drop-target { border-color: var(--primary); background: var(--surface-translucent-strong); }
 .add-question { width: 100%; border: 1px dashed var(--add-menu-line); background: var(--surface); color: var(--add-menu-ink); border-radius: 9px; padding: 9px 10px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; font-weight: 700; cursor: pointer; transition: border-color .18s ease, color .18s ease; }
 .add-question:hover { border-color: var(--primary-line); color: var(--primary); }
 .add-question .icon { color: var(--primary); }
