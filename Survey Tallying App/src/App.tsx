@@ -297,6 +297,20 @@ function sectionForQuestion(survey: Survey, questionId: string) {
   return current
 }
 
+/**
+ * Section blocks are display-only dividers: they carry no number and do not
+ * advance the count, so a survey with 3 questions and 2 sections is numbered
+ * 1, 2, 3 with the sections left blank.
+ */
+function questionNumbers(questions: Question[]): Array<number | null> {
+  let count = 0
+  return questions.map((question) => {
+    if (question.type === "section") return null
+    count += 1
+    return count
+  })
+}
+
 function csvCell(value: unknown) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`
 }
@@ -311,11 +325,25 @@ function App() {
   const [view, setView] = useState<View>("surveys")
   const [notice, setNotice] = useState("")
   const [loading, setLoading] = useState(true)
+  // Distinguishes the first load from a background refresh. Only the first one
+  // is allowed to replace the whole UI; later refreshes keep what is on screen
+  // so a re-fetch never reads as a page reload.
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [theme, setTheme] = useState<Theme>(loadTheme)
   const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
+
+  // Deliberately the user id rather than the session object: Supabase hands out
+  // a fresh session object on token refresh and on INITIAL_SESSION, and depending
+  // on its identity re-runs the load effect, which flips `loading` back to true
+  // and re-fetches everything — the app visibly reloads. The id is stable.
+  const userId = session?.user?.id ?? null
+
+  // Derived rather than corrected with a render-phase setView, which forced React
+  // into an extra render pass on every tab change.
+  const activeView: View = survey ? view : "surveys"
 
   useEffect(() => {
     let cancelled = false
@@ -341,7 +369,7 @@ function App() {
   useEffect(() => {
     if (!authReady) return
 
-    if (!session) {
+    if (!userId) {
       syncedRef.current = []
       setSurveys([])
       setSelectedId("")
@@ -357,6 +385,7 @@ function App() {
         syncedRef.current = loaded
         setSurveys(loaded)
         setSelectedId(loaded[0]?.id ?? "")
+        setHasLoadedOnce(true)
       })
       .catch((error: unknown) => {
         if (cancelled) return
@@ -368,10 +397,10 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [session, authReady])
+  }, [userId, authReady])
 
   useEffect(() => {
-    if (loading || !session) return
+    if (loading || !userId) return
     const previous = syncedRef.current
     const timer = window.setTimeout(() => {
       syncSurveys(surveys, previous)
@@ -383,7 +412,7 @@ function App() {
         })
     }, SYNC_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [surveys, loading, session])
+  }, [surveys, loading, userId])
 
   useEffect(() => {
     if (!notice) return
@@ -395,13 +424,13 @@ function App() {
   // back where you left instead of snapping to the top. useLayoutEffect runs
   // before paint, which avoids a visible jump to the top and back.
   const scrollPositionsRef = useRef<Partial<Record<View, number>>>({})
-  const previousViewRef = useRef<View>(view)
+  const previousViewRef = useRef<View>(activeView)
   useLayoutEffect(() => {
-    if (previousViewRef.current === view) return
+    if (previousViewRef.current === activeView) return
     scrollPositionsRef.current[previousViewRef.current] = window.scrollY
-    previousViewRef.current = view
-    window.scrollTo(0, scrollPositionsRef.current[view] ?? 0)
-  }, [view])
+    previousViewRef.current = activeView
+    window.scrollTo(0, scrollPositionsRef.current[activeView] ?? 0)
+  }, [activeView])
 
   const chooseTheme = (next: Theme) => {
     setTheme(next)
@@ -439,15 +468,13 @@ function App() {
 
   if (!session) return <LoginScreen />
 
-  if (loading) {
+  if (loading && !hasLoadedOnce) {
     return (
       <div className="empty-state">
         <h3>Loading your surveys…</h3>
       </div>
     )
   }
-
-  if (!survey && view !== "surveys") setView("surveys")
 
   return (
     <div className="app-shell">
@@ -464,33 +491,38 @@ function App() {
         </button>
         <nav className="nav" aria-label="Primary navigation">
           <NavItem
-            active={view === "surveys"}
+            active={activeView === "surveys"}
             icon="surveys"
             label="Surveys"
             onClick={() => setView("surveys")}
           />
           <NavItem
-            active={view === "builder"}
+            active={activeView === "builder"}
             disabled={!survey}
             icon="builder"
             label="Builder"
             onClick={() => setView("builder")}
           />
           <NavItem
-            active={view === "tally"}
+            active={activeView === "tally"}
             disabled={!survey}
             icon="tally"
             label="Tally"
             onClick={() => setView("tally")}
           />
           <NavItem
-            active={view === "results"}
+            active={activeView === "results"}
             disabled={!survey}
             icon="results"
             label="Results"
             onClick={() => setView("results")}
           />
         </nav>
+        {loading && hasLoadedOnce && (
+          <p className="sync-note" role="status">
+            Refreshing…
+          </p>
+        )}
         <div className="theme-switch" role="group" aria-label="Colour theme">
           {THEME_OPTIONS.map((option) => (
             <button
@@ -525,7 +557,7 @@ function App() {
       </aside>
 
       <main className="main">
-        {view === "surveys" && (
+        <div className="view-pane" hidden={activeView !== "surveys"}>
           <SurveyLibrary
             surveys={surveys}
             onCreate={createSurvey}
@@ -565,30 +597,39 @@ function App() {
               ])
               setNotice("Backup imported")
             }}
-          />
-        )}
-        {survey && view === "builder" && (
-          <SurveyBuilder
-            survey={survey}
-            onChange={(next) => updateSurvey(survey.id, () => next)}
-            onTally={() => setView("tally")}
-            onBack={() => setView("surveys")}
-          />
-        )}
-        {survey && view === "tally" && (
-          <TallyWorkspace
-            survey={survey}
-            onChange={(next) => updateSurvey(survey.id, () => next)}
-            onResults={() => setView("results")}
-          />
-        )}
-        {survey && view === "results" && (
-          <ResultsView
-            survey={survey}
-            onChange={(next) => updateSurvey(survey.id, () => next)}
-            onTally={() => setView("tally")}
-          />
-        )}
+            />
+        </div>
+        <div className="view-pane" hidden={activeView !== "builder"}>
+          {survey && (
+            <SurveyBuilder
+              key={survey.id}
+              survey={survey}
+              onChange={(next) => updateSurvey(survey.id, () => next)}
+              onTally={() => setView("tally")}
+              onBack={() => setView("surveys")}
+            />
+          )}
+        </div>
+        <div className="view-pane" hidden={activeView !== "tally"}>
+          {survey && (
+            <TallyWorkspace
+              key={survey.id}
+              survey={survey}
+              onChange={(next) => updateSurvey(survey.id, () => next)}
+              onResults={() => setView("results")}
+            />
+          )}
+        </div>
+        <div className="view-pane" hidden={activeView !== "results"}>
+          {survey && (
+            <ResultsView
+              key={survey.id}
+              survey={survey}
+              onChange={(next) => updateSurvey(survey.id, () => next)}
+              onTally={() => setView("tally")}
+            />
+          )}
+        </div>
       </main>
       {notice && (
         <div className="toast" role="status">
@@ -891,6 +932,8 @@ function SurveyBuilder({
           q.options.filter((o) => o.label.trim()).length >= 2),
     )
 
+  const outlineNumbers = questionNumbers(survey.questions)
+
   const positionLabel =
     insertPosition === "start"
       ? "at the beginning"
@@ -980,7 +1023,13 @@ function SurveyBuilder({
                 }}
               >
                 <Icon name="grip" size={14} />
-                <span className="question-number">{index + 1}</span>
+                <span
+                  className={`question-number${
+                    outlineNumbers[index] === null ? " empty" : ""
+                  }`}
+                >
+                  {outlineNumbers[index] ?? ""}
+                </span>
                 <span>
                   <strong>{question.prompt || "Untitled"}</strong>
                   <small>{TYPE_LABELS[question.type]}</small>
@@ -1396,6 +1445,8 @@ function BatchQuestionEditor({
   onCancel: () => void
   onAdd: () => void
 }) {
+  const draftNumbers = questionNumbers(questions)
+
   const updateDraft = (id: string, patch: Partial<Question>) =>
     onChange(
       questions.map((question) =>
@@ -1488,7 +1539,13 @@ function BatchQuestionEditor({
         <div className="batch-list">
           {questions.map((question, index) => (
             <article className="batch-question" key={question.id}>
-              <span className="question-number">{index + 1}</span>
+              <span
+                className={`question-number${
+                  draftNumbers[index] === null ? " empty" : ""
+                }`}
+              >
+                {draftNumbers[index] ?? ""}
+              </span>
               <div className="batch-question-content">
                 <div className="batch-question-fields">
                   <Field
@@ -2065,8 +2122,12 @@ function QuickTally({
   onNext: () => void
   onSave: () => void
 }) {
+  const cardRef = useRef<HTMLElement | null>(null)
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      // Views stay mounted but hidden so their state survives a tab switch, so
+      // ignore shortcuts unless this card is the one actually on screen.
+      if (!cardRef.current?.offsetParent) return
       const target = event.target as HTMLElement
       if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return
       if (event.repeat) return
@@ -2099,7 +2160,7 @@ function QuickTally({
     return () => window.removeEventListener("keydown", handler)
   }, [question, answer, setAnswer])
   return (
-    <section className="quick-card">
+    <section className="quick-card" ref={cardRef}>
       <div className="progress-head">
         <span>
           Question {index + 1} of {total}
