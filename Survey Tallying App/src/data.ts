@@ -43,35 +43,3 @@ export function makeSurvey(title = "Untitled survey"): Survey {
     updatedAt: now,
   }
 }
-
-export function seedSurvey(): Survey {
-  const survey = makeSurvey("Community feedback")
-  survey.description = "A quick four-question neighborhood check-in."
-  survey.status = "active"
-  survey.questions = [
-    {
-      ...makeQuestion("single"),
-      prompt: "How would you rate local services?",
-      options: ["Excellent", "Good", "Fair", "Poor"].map((label) => ({
-        id: uid(),
-        label,
-      })),
-    },
-    {
-      ...makeQuestion("yesno"),
-      prompt: "Do you feel heard by local leaders?",
-    },
-    {
-      ...makeQuestion("rating"),
-      prompt: "How likely are you to participate again?",
-      min: 1,
-      max: 5,
-    },
-    {
-      ...makeQuestion("short"),
-      prompt: "What is one thing we should improve?",
-      required: false,
-    },
-  ]
-  return survey
-}

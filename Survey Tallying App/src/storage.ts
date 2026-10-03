@@ -1,5 +1,4 @@
 import type { Answer, Question, ResponseRecord, Survey } from "./types"
-import { seedSurvey } from "./data"
 import { getUserId } from "./auth"
 import { MISSING_ENV_MESSAGE, supabase } from "./lib/supabase"
 
@@ -118,13 +117,18 @@ function toSurvey(row: SurveyRow, responses: ResponseRow[]): Survey {
 
 /**
  * Reads every survey with its responses already hydrated onto it, so the rest of
- * the app keeps working with the same `Survey` shape it always had. Creates the
- * seeded example the first time the database is empty.
+ * the app keeps working with the same `Survey` shape it always had.
+ *
+ * An empty database stays empty: the app opens on its own "create a survey"
+ * empty state rather than seeding a demo, so a real account never mixes example
+ * data with genuine responses.
  */
 export async function loadSurveys(): Promise<Survey[]> {
   if (!supabase) throw new Error(MISSING_ENV_MESSAGE)
 
-  const userId = requireUserId()
+  // RLS already scopes this query to the signed-in user; calling the helper here
+  // just fails fast if the session vanished between rendering and loading.
+  requireUserId()
 
   localStorage.removeItem(LEGACY_STORAGE_KEY)
 
@@ -140,14 +144,6 @@ export async function loadSurveys(): Promise<Survey[]> {
   if (responsesResult.error) throw new Error(responsesResult.error.message)
 
   const surveyRows = (surveysResult.data ?? []) as SurveyRow[]
-  if (surveyRows.length === 0) {
-    const seed = seedSurvey()
-    const { error } = await supabase
-      .from("surveys")
-      .upsert(toSurveyRow(seed, userId))
-    if (error) throw new Error(error.message)
-    return [seed]
-  }
 
   const responsesBySurvey = new Map<string, ResponseRow[]>()
   for (const row of (responsesResult.data ?? []) as ResponseRow[]) {
