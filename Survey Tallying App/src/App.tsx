@@ -1135,6 +1135,47 @@ function App() {
 
   if (!session) return <LoginScreen canRegister={!accountsOff} />
 
+  // Who you are, and whether you are allowed in, are settled before anything
+  // talks about loading surveys.
+  //
+  // These two have to come above the loading gate, and the reason is the load
+  // effect above: it deliberately does not run while `canAccess` is false, so
+  // `loading` stays true for the whole waiting period. Behind that gate, an
+  // unverified account sat on "Loading your surveys…" indefinitely instead of
+  // the screen that explains why.
+  //
+  // `loading` is also left true on purpose. The sync effect skips while it is
+  // true, and that is the only thing stopping an empty workspace being written
+  // back over a waiting user's surveys.
+  if (userId && !accountChecked && !accountsOff) {
+    return (
+      <div className="login-screen">
+        <div className="login-card">
+          <div className="login-brand">
+            <span className="brand-mark">
+              <Icon name="check" size={19} />
+            </span>
+            <span>Tallyform</span>
+          </div>
+          <p className="login-foot">Checking your account…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (userId && !canAccess) {
+    return (
+      <WaitingRoom
+        account={account}
+        onSignOut={() => {
+          void signOutOfSupabase().catch((error: unknown) => {
+            setNotice(describeStorageError(error))
+          })
+        }}
+      />
+    )
+  }
+
   if (loading && !hasLoadedOnce) {
     return (
       <div className="empty-state">
@@ -1198,35 +1239,6 @@ function App() {
     }
     window.addEventListener("pointermove", onMove)
     window.addEventListener("pointerup", onUp)
-  }
-
-  if (userId && !accountChecked && !accountsOff) {
-    return (
-      <div className="login-screen">
-        <div className="login-card">
-          <div className="login-brand">
-            <span className="brand-mark">
-              <Icon name="check" size={19} />
-            </span>
-            <span>Tallyform</span>
-          </div>
-          <p className="login-foot">Checking your account…</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (userId && !canAccess) {
-    return (
-      <WaitingRoom
-        account={account}
-        onSignOut={() => {
-          void signOutOfSupabase().catch((error: unknown) => {
-            setNotice(describeStorageError(error))
-          })
-        }}
-      />
-    )
   }
 
   return (
