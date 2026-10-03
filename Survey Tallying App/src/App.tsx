@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -14,6 +15,7 @@ import {
   subscribeToSession,
 } from "./auth"
 import LoginScreen from "./LoginScreen"
+import { THEME_OPTIONS, loadTheme, saveTheme, type Theme } from "./theme"
 import {
   describeStorageError,
   downloadFile,
@@ -311,6 +313,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
+  const [theme, setTheme] = useState<Theme>(loadTheme)
   const syncedRef = useRef<Survey[]>([])
   const survey = surveys.find((item) => item.id === selectedId) ?? surveys[0]
 
@@ -387,6 +390,23 @@ function App() {
     const timer = window.setTimeout(() => setNotice(""), 3600)
     return () => window.clearTimeout(timer)
   }, [notice])
+
+  // Each view remembers where you scrolled to, so moving between tabs puts you
+  // back where you left instead of snapping to the top. useLayoutEffect runs
+  // before paint, which avoids a visible jump to the top and back.
+  const scrollPositionsRef = useRef<Partial<Record<View, number>>>({})
+  const previousViewRef = useRef<View>(view)
+  useLayoutEffect(() => {
+    if (previousViewRef.current === view) return
+    scrollPositionsRef.current[previousViewRef.current] = window.scrollY
+    previousViewRef.current = view
+    window.scrollTo(0, scrollPositionsRef.current[view] ?? 0)
+  }, [view])
+
+  const chooseTheme = (next: Theme) => {
+    setTheme(next)
+    saveTheme(next)
+  }
 
   const updateSurvey = (id: string, updater: (current: Survey) => Survey) => {
     setSurveys((current) =>
@@ -471,6 +491,19 @@ function App() {
             onClick={() => setView("results")}
           />
         </nav>
+        <div className="theme-switch" role="group" aria-label="Colour theme">
+          {THEME_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={theme === option.value ? "active" : ""}
+              aria-pressed={theme === option.value}
+              onClick={() => chooseTheme(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         <div className="sidebar-foot">
           <div className="privacy-dot" />
           <div>
@@ -776,6 +809,7 @@ function SurveyBuilder({
   const [selected, setSelected] = useState(survey.questions[0]?.id ?? "")
   const [addCount, setAddCount] = useState("1")
   const [insertPosition, setInsertPosition] = useState("end")
+  const [pendingType, setPendingType] = useState<QuestionType>("single")
   const [pendingQuestions, setPendingQuestions] = useState<Question[]>([])
   const update = (patch: Partial<Survey>) => onChange({ ...survey, ...patch })
   const updateQuestion = (id: string, patch: Partial<Question>) =>
@@ -785,13 +819,31 @@ function SurveyBuilder({
       ),
     })
   const addQuestion = (type: QuestionType) => {
-    const parsedCount = Number(addCount)
-    if (!Number.isFinite(parsedCount) || parsedCount < 1) return
-    const safeCount = Math.min(100, Math.floor(parsedCount))
-    const questions = Array.from({ length: safeCount }, () =>
-      makeQuestion(type),
-    )
-    setPendingQuestions(questions)
+    setPendingType(type)
+    setAddCount("1")
+    setPendingQuestions([makeQuestion(type)])
+  }
+
+  /**
+   * Growing the batch keeps whatever the operator has already typed, and only
+   * appends fresh blanks of the same type. Shrinking trims from the end.
+   */
+  const setPendingCount = (value: string) => {
+    const parsed = Number(value)
+    if (value === "" || !Number.isFinite(parsed) || parsed < 1) {
+      setAddCount("")
+      return
+    }
+    const safeCount = Math.min(100, Math.floor(parsed))
+    setAddCount(String(safeCount))
+    setPendingQuestions((current) => {
+      if (current.length === safeCount) return current
+      if (current.length > safeCount) return current.slice(0, safeCount)
+      const extra = Array.from({ length: safeCount - current.length }, () =>
+        makeQuestion(pendingType),
+      )
+      return [...current, ...extra]
+    })
   }
   const commitPendingQuestions = () => {
     if (!pendingQuestions.length) return
@@ -809,6 +861,7 @@ function SurveyBuilder({
     update({ questions: next })
     setSelected(pendingQuestions[0].id)
     setPendingQuestions([])
+    setAddCount("1")
   }
   const move = (id: string, direction: number) => {
     const from = survey.questions.findIndex((item) => item.id === id)
@@ -837,6 +890,17 @@ function SurveyBuilder({
         (!["single", "multiple", "yesno"].includes(q.type) ||
           q.options.filter((o) => o.label.trim()).length >= 2),
     )
+
+  const positionLabel =
+    insertPosition === "start"
+      ? "at the beginning"
+      : insertPosition === "end"
+        ? "at the end"
+        : `after question ${
+            survey.questions.findIndex(
+              (question) => question.id === insertPosition,
+            ) + 1
+          }`
 
   return (
     <div className="page builder-page">
@@ -868,46 +932,9 @@ function SurveyBuilder({
         <aside className="builder-outline">
           <div className="add-menu">
             <p>Add questions</p>
-            <div className="add-controls">
-              <Field label="How many">
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={100}
-                  inputMode="numeric"
-                  value={addCount}
-                  onChange={(event) => {
-                    const value = event.target.value
-                    const numericValue = Number(value)
-                    setAddCount(
-                      value === "" || !Number.isFinite(numericValue)
-                        ? ""
-                        : String(Math.min(100, numericValue)),
-                    )
-                  }}
-                />
-              </Field>
-              <Field label="Add position">
-                <SelectInput
-                  value={insertPosition}
-                  onChange={(event) => setInsertPosition(event.target.value)}
-                >
-                  <option value="end">At the end</option>
-                  <option value="start">At the beginning</option>
-                  {survey.questions.map((question, index) => (
-                    <option value={question.id} key={question.id}>
-                      After {index + 1}. {question.prompt}
-                    </option>
-                  ))}
-                </SelectInput>
-              </Field>
-            </div>
             <span className="add-helper">
-              {Number(addCount) > 0
-                ? `Choose a type below to prepare ${addCount} ${
-                    Number(addCount) === 1 ? "question" : "questions"
-                  }.`
-                : "Enter how many questions you want to prepare."}
+              Pick a type to start. How many, and exactly where they land, comes
+              next.
             </span>
             {Object.entries(TYPE_LABELS).map(([type, label]) => (
               <button
@@ -922,7 +949,9 @@ function SurveyBuilder({
           </div>
           <div className="panel-title">
             <span>Questions</span>
-            <span>{survey.questions.length}</span>
+            <span>
+              {survey.questions.filter((q) => q.type !== "section").length}
+            </span>
           </div>
           <div className="question-list">
             {survey.questions.map((question, index) => (
@@ -1329,17 +1358,12 @@ function SurveyBuilder({
       {pendingQuestions.length > 0 && (
         <BatchQuestionEditor
           questions={pendingQuestions}
-          position={
-            insertPosition === "start"
-              ? "at the beginning"
-              : insertPosition === "end"
-                ? "at the end"
-                : `after question ${
-                    survey.questions.findIndex(
-                      (question) => question.id === insertPosition,
-                    ) + 1
-                  }`
-          }
+          count={addCount}
+          position={insertPosition}
+          positionLabel={positionLabel}
+          positionOptions={survey.questions}
+          onCountChange={setPendingCount}
+          onPositionChange={setInsertPosition}
           onChange={setPendingQuestions}
           onCancel={() => setPendingQuestions([])}
           onAdd={commitPendingQuestions}
@@ -1351,13 +1375,23 @@ function SurveyBuilder({
 
 function BatchQuestionEditor({
   questions,
+  count,
   position,
+  positionLabel,
+  positionOptions,
+  onCountChange,
+  onPositionChange,
   onChange,
   onCancel,
   onAdd,
 }: {
   questions: Question[]
+  count: string
   position: string
+  positionLabel: string
+  positionOptions: Question[]
+  onCountChange: (value: string) => void
+  onPositionChange: (value: string) => void
   onChange: (questions: Question[]) => void
   onCancel: () => void
   onAdd: () => void
@@ -1417,9 +1451,35 @@ function BatchQuestionEditor({
               {questions.length === 1 ? "question" : "questions"}
             </h2>
             <span>
-              These questions will be added {position}. Nothing is saved until
-              you select Add all.
+              These questions will be added {positionLabel}. Nothing is saved
+              until you select Add all.
             </span>
+            <div className="batch-controls">
+              <Field label="How many">
+                <TextInput
+                  type="number"
+                  min={1}
+                  max={100}
+                  inputMode="numeric"
+                  value={count}
+                  onChange={(event) => onCountChange(event.target.value)}
+                />
+              </Field>
+              <Field label="Add position">
+                <SelectInput
+                  value={position}
+                  onChange={(event) => onPositionChange(event.target.value)}
+                >
+                  <option value="end">At the end</option>
+                  <option value="start">At the beginning</option>
+                  {positionOptions.map((question, index) => (
+                    <option value={question.id} key={question.id}>
+                      After {index + 1}. {question.prompt}
+                    </option>
+                  ))}
+                </SelectInput>
+              </Field>
+            </div>
           </div>
           <Button variant="ghost" onClick={onCancel}>
             Cancel
@@ -1675,6 +1735,18 @@ function TallyWorkspace({
   )
   const active = questions[activeIndex]
   const valid = questions.every((q) => !q.required || isAnswered(answers[q.id]))
+
+  // Switching between Quick keys, Tap form and Response grid changes the page
+  // height, so each mode keeps its own scroll position instead of inheriting
+  // whatever offset the previous mode happened to leave behind.
+  const modeScrollRef = useRef<Partial<Record<TallyMode, number>>>({})
+  const previousModeRef = useRef<TallyMode>(mode)
+  useLayoutEffect(() => {
+    if (previousModeRef.current === mode) return
+    modeScrollRef.current[previousModeRef.current] = window.scrollY
+    previousModeRef.current = mode
+    window.scrollTo(0, modeScrollRef.current[mode] ?? 0)
+  }, [mode])
   useEffect(() => {
     advancingQuestionRef.current = null
   }, [active?.id])

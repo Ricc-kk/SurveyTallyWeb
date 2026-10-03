@@ -1,11 +1,13 @@
 import { useState, type FormEvent } from "react"
 import { signIn } from "./auth"
+import { THEME_OPTIONS, loadTheme, saveTheme, type Theme } from "./theme"
 
 export default function LoginScreen() {
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const [theme, setTheme] = useState<Theme>(loadTheme)
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -86,6 +88,23 @@ export default function LoginScreen() {
         <p className="login-foot">
           Administrator access only. There is no public sign-up.
         </p>
+
+        <div className="login-theme" role="group" aria-label="Colour theme">
+          {THEME_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={theme === option.value ? "active" : ""}
+              aria-pressed={theme === option.value}
+              onClick={() => {
+                setTheme(option.value)
+                saveTheme(option.value)
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   )

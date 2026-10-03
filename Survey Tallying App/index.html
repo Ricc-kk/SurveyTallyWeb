@@ -4,6 +4,24 @@
     <!-- figma:head-start -->
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Runs before first paint so the correct theme is already applied and the
+      // page never flashes the wrong background on load.
+      ;(function () {
+        try {
+          var stored = window.localStorage.getItem("tallyform.theme")
+          var theme =
+            stored === "light" || stored === "dark"
+              ? stored
+              : window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+          document.documentElement.dataset.theme = theme
+        } catch (error) {
+          document.documentElement.dataset.theme = "light"
+        }
+      })()
+    </script>
     <title><!-- figma:title --></title>
     <!-- figma:head-end -->
   </head>
